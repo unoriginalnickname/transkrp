@@ -19,6 +19,8 @@ import argparse
 import json
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 
 import yt_dlp
@@ -86,13 +88,36 @@ def _translated(info: dict) -> bool:
     return bool(lang) and lang.split("-", 1)[0] != "en"
 
 
+def _get(url: str, tries: int = 4) -> bytes:
+    """Fetch the caption JSON, retrying the transient 429 with backoff.
+
+    YouTube rate-limits repeated caption pulls (and blocks datacenter IPs
+    outright). 429 is transient, so back off and retry; surface anything else as
+    a clean LookupError rather than a urllib traceback.
+    """
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(url) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < tries - 1:
+                time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
+                continue
+            if e.code == 429:
+                raise LookupError("YouTube rate-limited the caption fetch (429) - "
+                                  "wait a minute and retry") from e
+            raise LookupError(f"caption fetch failed (HTTP {e.code})") from e
+        except urllib.error.URLError as e:
+            raise LookupError(f"caption fetch failed: {e.reason}") from e
+    raise LookupError("caption fetch failed after retries")
+
+
 def segments(info: dict, source: str, key: str) -> list[tuple[int, int, str]]:
     fmts = info["subtitles" if source == "manual" else "automatic_captions"][key]
     json3 = next((f for f in fmts if f.get("ext") == "json3"), None)
     if not json3:
         raise LookupError(f"track {key!r} has no json3 format")
-    with urllib.request.urlopen(json3["url"]) as r:
-        events = json.loads(r.read().decode("utf-8")).get("events", [])
+    events = json.loads(_get(json3["url"]).decode("utf-8")).get("events", [])
 
     out = []
     for e in events:
