@@ -22,10 +22,13 @@ Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
 -o -             stdout
 --json           JSON instead of markdown
 --list           show the caption tracks and exit
---lang KEY       force a track (e.g. en-orig)
+--lang KEY       force a track (e.g. en-orig), or 'auto' for the spoken language
 --words N        target paragraph length (default 110)
 --proxy URL      route both requests through a proxy
+--cookies WHAT   browser name or cookies.txt, for age-restricted videos
 --skip-existing  don't refetch what's already in the output directory
+--force          refetch anyway, when captions have been corrected
+--version
 ```
 
 Several videos at once, and playlists and channels expand:
@@ -90,10 +93,22 @@ Tells you whether to trust the file:
 
 ## Track selection
 
-Manual wins over auto. Keys aren't always `en`: there's `en-orig` (the original
-spoken track), `en-US`/`en-GB`, and multi-track videos expose `en-<trackid>`.
-Where several English tracks exist and none is plainly `en`, the pick is
-arbitrary — use `--list` to see them, `--lang` to choose.
+In order: a human transcript in English, a human transcript in the language
+spoken, the original speech recognition, and only then a machine translation.
+
+That last ordering matters more than it looks. YouTube lists ~150 machine
+translations of its own ASR alongside the original, so a German video offers an
+`en` auto track — and taking it gives you a machine translation of a machine
+transcription while the human German transcript sits one line below. Two lossy
+steps where one would do.
+
+`--lang auto` skips the English preference entirely. `--lang KEY` forces a
+specific track, and an explicitly requested translation is honoured and flagged.
+
+Keys aren't always the bare code: there's `en-orig` (the original spoken track),
+`en-US`/`en-GB`, and multi-track videos expose `en-<trackid>`. Where several
+tracks in one language exist and none is plainly named, the pick is arbitrary —
+use `--list` to see them.
 
 ## Why not just yt-dlp
 

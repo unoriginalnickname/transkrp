@@ -213,7 +213,7 @@ def test_a_batch_run_stops_when_the_server_rate_limits(serve, instant, tmp_path,
     """
     srv = serve(status(429))
 
-    def fake_probe(url, proxy=None):
+    def fake_probe(url, proxy=None, cookies=None):
         return {"title": f"Video {url[-1]}", "id": f"vid1234567{url[-1]}",
                 "language": "en", "duration": 60,
                 "subtitles": {"en": [{"ext": "json3", "url": url_of(srv)}]},
@@ -238,7 +238,7 @@ def test_a_batch_run_survives_one_bad_video(serve, instant, tmp_path,
     good = serve(ok(payload(ev(0, 1000, "Hello there."))))
     bad = serve(status(404))
 
-    def fake_probe(url, proxy=None):
+    def fake_probe(url, proxy=None, cookies=None):
         which = bad if url.endswith("1") else good
         return {"title": f"Video {url[-1]}", "id": f"vid1234567{url[-1]}",
                 "language": "en", "duration": 60,

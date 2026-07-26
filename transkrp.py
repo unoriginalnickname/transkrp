@@ -79,13 +79,29 @@ def _looks_rate_limited(msg: str) -> bool:
     return bool(_BLOCKED.search(msg))
 
 
-def probe(url: str, proxy: str | None = None) -> dict:
+def _cookie_opts(cookies: str | None) -> dict:
+    """yt-dlp options for --cookies, which takes a browser name or a file path.
+
+    Age-gated and sign-in-required videos are the reason: without cookies they
+    fail at the probe with "Sign in to confirm your age" and there is nothing to
+    fetch. A path is a Netscape cookie jar; anything else is read as a browser
+    name, the same spelling yt-dlp uses (`firefox`, `chrome:Profile 1`).
+    """
+    if not cookies:
+        return {}
+    if os.path.exists(cookies):
+        return {"cookiefile": cookies}
+    browser, _, profile = cookies.partition(":")
+    return {"cookiesfrombrowser": (browser.lower(), profile or None, None, None)}
+
+
+def probe(url: str, proxy: str | None = None, cookies: str | None = None) -> dict:
     """Video metadata, including the index of caption tracks.
 
     `noplaylist` because a video shared from inside a playlist carries `&list=`,
     and yt-dlp would otherwise extract all 200 of its neighbours.
     """
-    info = _extract(url, noplaylist=True, proxy=proxy)
+    info = _extract(url, noplaylist=True, proxy=proxy, **_cookie_opts(cookies))
     if info.get("_type") == "playlist":
         n = len(info.get("entries") or [])
         raise LookupError(f"that URL is a playlist ({n} videos), not a video")
@@ -115,7 +131,7 @@ def video_id(url: str) -> str | None:
     return m.group(0)[-11:] if m else None
 
 
-def expand(url: str, proxy: str | None = None) -> list[str]:
+def expand(url: str, proxy: str | None = None, cookies: str | None = None) -> list[str]:
     """Resolve one URL to video URLs; a playlist or channel becomes its entries.
 
     Flat extraction, so a 200-video playlist costs one request instead of 200 —
@@ -123,7 +139,7 @@ def expand(url: str, proxy: str | None = None) -> list[str]:
     """
     if not is_playlist_url(url):
         return [url]
-    info = _extract(url, extract_flat="in_playlist", proxy=proxy)
+    info = _extract(url, extract_flat="in_playlist", proxy=proxy, **_cookie_opts(cookies))
     if info.get("_type") != "playlist":
         return [url]
     out = []
@@ -141,31 +157,74 @@ def expand(url: str, proxy: str | None = None) -> list[str]:
 
 
 def pick_track(info: dict, want: str | None = None) -> tuple[str, str, bool]:
-    """Return (source, key, translated). Manual wins; it needs no repair."""
+    """Return (source, key, translated). Manual wins; it needs no repair.
+
+    English first, then the language the video is actually in. Preferring English
+    is a default, not a requirement: erroring out on a German video when a German
+    track is sitting right there made the user run --list and pass --lang to
+    learn something we already knew.
+
+    `--lang auto` skips the English preference and takes the spoken language.
+    """
     manual, auto = info.get("subtitles") or {}, info.get("automatic_captions") or {}
 
-    if want:
+    if want and want != "auto":
         if want in manual:
             return "manual", want, False
         if want in auto:
-            return "auto", want, _translated(info)
+            return "auto", want, _translated(info, want)
         raise LookupError(f"no caption track {want!r}; manual tracks are "
                           f"{_names(manual)} (see --list for the auto ones)")
 
-    for source, tracks in (("manual", manual), ("auto", auto)):
-        # Keys aren't always "en": there's en-orig (original spoken track),
-        # en-US/en-GB, and multi-track videos expose en-<trackid>.
-        english = [k for k in tracks if k.split("-", 1)[0].lower() == "en"]
-        if english:
-            key = next((k for k in ("en", "en-orig", "en-US", "en-GB") if k in english), english[0])
-            return source, key, _translated(info) if source == "auto" else False
+    for source, prefix in _preference(info, want):
+        tracks = manual if source == "manual" else auto
+        # Keys aren't always the bare code: there's en-orig (original spoken
+        # track), en-US/en-GB, and multi-track videos expose en-<trackid>.
+        matches = [k for k in tracks if k.split("-", 1)[0].lower() == prefix]
+        if matches:
+            key = next((k for k in (prefix, f"{prefix}-orig", f"{prefix}-US",
+                                    f"{prefix}-GB") if k in matches), matches[0])
+            return source, key, _translated(info, key) if source == "auto" else False
 
-    # Say what there *is*: on a foreign-language video the fix is --lang, and
-    # "no English captions" alone doesn't tell you that one would work.
+    # Say what there *is*: with nothing in English and nothing in the spoken
+    # language, --lang is the fix and the user needs to know what to pass.
     if manual or auto:
-        raise LookupError(f"no English captions; manual tracks are {_names(manual)} "
-                          f"- pass --lang to pick one")
+        spoken = _lang_of(info)
+        raise LookupError(f"no captions in English{f' or {spoken}' if spoken else ''}; "
+                          f"manual tracks are {_names(manual)} - pass --lang to pick one")
     raise LookupError("this video has no captions at all")
+
+
+def _lang_of(info: dict) -> str:
+    """The video's own language as a bare prefix: 'en-US' -> 'en'."""
+    return (info.get("language") or "").split("-", 1)[0].lower()
+
+
+def _preference(info: dict, want: str | None) -> list[tuple[str, str]]:
+    """(source, language) pairs to try, best first.
+
+    The ordering that matters is inside the auto tracks. YouTube lists ~150
+    machine translations of its ASR alongside the original, so a German video
+    offers an "en" auto track — and taking it means a machine translation of a
+    machine transcription when the original German was right there. Two lossy
+    steps where one would do, and it reads like it.
+
+    So: human transcription first in either language, then the *original* ASR,
+    and a translation only as a last resort. A manual English track on a German
+    video is a real human translation and is genuinely preferable; a machine one
+    is not.
+    """
+    native = _lang_of(info)
+    order = []
+    if want != "auto":
+        order.append(("manual", "en"))
+    if native:
+        order += [("manual", native), ("auto", native)]
+    if want != "auto":
+        order.append(("auto", "en"))
+    if not native:  # language unknown: nothing to prefer but English
+        order = [p for p in order if p[1] == "en"]
+    return list(dict.fromkeys(order))
 
 
 def _names(tracks: dict, limit: int = 8) -> str:
@@ -190,12 +249,21 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
-def _translated(info: dict) -> bool:
-    # YouTube auto-translates its ASR into ~150 languages and lists them all
-    # under automatic_captions. An "en" entry on a non-English video is a
-    # machine translation of a machine transcription.
-    lang = (info.get("language") or "").lower()
-    return bool(lang) and lang.split("-", 1)[0] != "en"
+def _translated(info: dict, key: str) -> bool:
+    """Is this auto track a machine translation, or the original ASR?
+
+    YouTube auto-translates its ASR into ~150 languages and lists them all under
+    automatic_captions, so an "en" entry on a Japanese video is a machine
+    translation of a machine transcription — two lossy steps, not one.
+
+    Comparing the *track's* language to the video's is what tells those apart. It
+    used to compare only the video's language against English, which was right
+    while English was the only thing we ever picked; now that we fall back to the
+    spoken language, that would label a German track on a German video a
+    translation of itself.
+    """
+    native = _lang_of(info)
+    return bool(native) and key.split("-", 1)[0].lower() != native
 
 
 def _transient(err: BaseException) -> bool:
@@ -405,7 +473,7 @@ def paragraphs(segs: list[tuple[int, int, str]], punctuated: bool | None = None,
 
 
 def transcript(url: str, lang: str | None = None, proxy: str | None = None,
-               target: int = TARGET_WORDS) -> dict:
+               target: int = TARGET_WORDS, cookies: str | None = None) -> dict:
     """Fetch a transcript. The one call another system needs.
 
     Returns a JSON-safe dict:
@@ -414,8 +482,11 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
 
     Raises LookupError if the video is unavailable or has no English captions.
     """
-    info = probe(url, proxy)
+    info = probe(url, proxy, cookies)
     source, key, translated = pick_track(info, lang)
+    # No cookies on the caption fetch, and that is not the --proxy oversight
+    # repeated: the timedtext URL is already signed by the player response that
+    # the cookied probe obtained. Authorisation is baked into the URL.
     segs = segments(info, source, key, proxy=proxy)
     if not segs:
         raise LookupError(f"caption track {key!r} was empty")
@@ -491,6 +562,19 @@ def stamp(ms: int) -> str:
     return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t % 3600 // 60:02d}:{t % 60:02d}"
 
 
+def _version() -> str:
+    """Installed version, or a marker when running from a checkout.
+
+    The distribution and the module are both `transkrp`. Kept explicit rather than
+    derived from __name__, which is "__main__" when run as a script.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        return version("transkrp")
+    except (ImportError, PackageNotFoundError):
+        return "(from source)"
+
+
 def render(t: dict, as_json: bool) -> str:
     return json.dumps(t, indent=2, ensure_ascii=False) if as_json else to_markdown(t)
 
@@ -539,7 +623,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("url", nargs="+", help="video URLs; a playlist or channel URL expands")
     ap.add_argument("-o", "--out", help="output file, or a directory for several videos; "
                                         "'-' for stdout (default: ./<title-slug>-<id>.<ext>)")
-    ap.add_argument("--lang", metavar="KEY", help="force a track key (e.g. en-orig)")
+    ap.add_argument("--lang", metavar="KEY",
+                    help="force a track key (e.g. en-orig), or 'auto' for the "
+                         "language the video is actually in")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of markdown")
     ap.add_argument("--list", action="store_true", help="show available tracks and exit")
     ap.add_argument("--proxy", metavar="URL", help="route both requests through a proxy; "
@@ -549,6 +635,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="don't refetch videos already written to the output "
                          "directory; use this to resume an interrupted run")
+    ap.add_argument("--force", action="store_true",
+                    help="refetch even what --skip-existing would skip; use when "
+                         "a video's captions have been corrected")
+    ap.add_argument("--cookies", metavar="BROWSER|FILE",
+                    help="browser to read cookies from (e.g. firefox, "
+                         "'chrome:Profile 1') or a cookies.txt path; needed for "
+                         "age-restricted and sign-in-required videos")
+    ap.add_argument("--version", action="version", version=f"transkrp {_version()}")
     args = ap.parse_args(argv)
 
     # A redirected stdout defaults to the locale encoding, which on Windows is
@@ -561,13 +655,13 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace", newline="\n")
 
     try:
-        urls = [v for u in args.url for v in expand(u, args.proxy)]
+        urls = [v for u in args.url for v in expand(u, args.proxy, args.cookies)]
     except LookupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
     if args.list:
-        return max((_list(u, args.proxy) for u in urls), default=0)
+        return max((_list(u, args.proxy, args.cookies) for u in urls), default=0)
 
     ext = "json" if args.json else "md"
     to_stdout = args.out == "-"
@@ -592,7 +686,7 @@ def main(argv: list[str] | None = None) -> int:
 
     docs, failed, skipped, done, fetched = [], 0, 0, 0, False
     for url in urls:
-        if args.skip_existing and not to_stdout:
+        if args.skip_existing and not args.force and not to_stdout:
             have = _already_written(url, out_dir, args.out, ext)
             if have:
                 print(f"have {os.path.basename(have)}", file=sys.stderr)
@@ -607,7 +701,7 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(1)
         fetched = True
         try:
-            t = transcript(url, args.lang, args.proxy, args.words)
+            t = transcript(url, args.lang, args.proxy, args.words, args.cookies)
         except RateLimited as e:
             # Every remaining video will fail the same way, and asking makes the
             # block worse. Stop and say how to pick up where this left off.
@@ -665,9 +759,9 @@ def _stdout_doc(docs: list, as_json: bool) -> str:
     return json.dumps(docs[0] if len(docs) == 1 else docs, indent=2, ensure_ascii=False)
 
 
-def _list(url: str, proxy: str | None = None) -> int:
+def _list(url: str, proxy: str | None = None, cookies: str | None = None) -> int:
     try:
-        info = probe(url, proxy)
+        info = probe(url, proxy, cookies)
     except LookupError as e:
         print(f"error: {url}: {e}", file=sys.stderr)
         return 1

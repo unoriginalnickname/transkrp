@@ -342,9 +342,74 @@ def test_missing_requested_track_lists_what_exists():
         tk.pick_track(info_with(manual=["de", "fr"]), "en")
 
 
-def test_foreign_video_error_points_at_lang():
-    with pytest.raises(LookupError, match=r"--lang"):
-        tk.pick_track(info_with(manual=["de"], language="de"))
+def test_foreign_video_falls_back_to_its_own_language():
+    """A German video with a German track shouldn't demand --lang to say so."""
+    assert tk.pick_track(info_with(manual=["de"], language="de")) == ("manual", "de", False)
+
+
+def test_english_still_wins_when_both_exist():
+    """The fallback is a fallback: it must not change what English videos do."""
+    src, key, _ = tk.pick_track(info_with(manual=["de", "en"], language="de"))
+    assert key == "en"
+
+
+def test_native_fallback_prefers_manual_over_auto():
+    src, key, tr = tk.pick_track(info_with(manual=["ja"], auto=["ja"], language="ja"))
+    assert (src, key, tr) == ("manual", "ja", False)
+
+
+def test_native_auto_track_is_not_called_a_translation():
+    """Japanese ASR on a Japanese video is one lossy step, not two."""
+    assert tk.pick_track(info_with(auto=["ja"], language="ja")) == ("auto", "ja", False)
+
+
+def test_a_human_native_track_beats_machine_translated_english():
+    """Caught live on a German news video, not by any synthetic fixture.
+
+    YouTube lists ~150 machine translations of its ASR beside the original, so a
+    German video offers an "en" auto track. Preferring it gave a machine
+    translation of a machine transcription while the human German transcript sat
+    one line below.
+    """
+    src, key, tr = tk.pick_track(info_with(manual=["de"], auto=["en", "de"], language="de"))
+    assert (src, key, tr) == ("manual", "de", False)
+
+
+def test_original_asr_beats_a_machine_translation():
+    """With no manual track at all, the original ASR still beats a translation."""
+    src, key, tr = tk.pick_track(info_with(auto=["en", "ja"], language="ja"))
+    assert (src, key, tr) == ("auto", "ja", False)
+
+
+def test_a_human_english_translation_is_still_preferred():
+    """A manual "en" track is a real translation by a person, not a machine."""
+    src, key, _ = tk.pick_track(info_with(manual=["en", "de"], auto=["de"], language="de"))
+    assert (src, key) == ("manual", "en")
+
+
+def test_machine_translation_is_the_last_resort():
+    """Nothing manual and no original ASR: take the translation, flagged."""
+    src, key, tr = tk.pick_track(info_with(auto=["en"], language="ja"))
+    assert (src, key, tr) == ("auto", "en", True)
+
+
+def test_lang_auto_skips_the_english_preference():
+    src, key, _ = tk.pick_track(info_with(manual=["de", "en"], language="de"), "auto")
+    assert key == "de"
+
+
+def test_lang_auto_on_an_english_video_is_still_english():
+    assert tk.pick_track(info_with(manual=["en"], language="en"), "auto")[1] == "en"
+
+
+def test_error_when_neither_english_nor_the_spoken_language_exists():
+    with pytest.raises(LookupError, match=r"English or ja.*--lang"):
+        tk.pick_track(info_with(manual=["de", "fr"], language="ja"))
+
+
+def test_regional_native_key_matches_the_bare_language():
+    """language is "de-DE" but the track is keyed "de"."""
+    assert tk.pick_track(info_with(manual=["de"], language="de-DE"))[1] == "de"
 
 
 def test_no_captions_at_all_says_so():
@@ -622,7 +687,7 @@ def test_markdown_ends_with_a_newline():
 # --------------------------------------------------------------------------
 
 def stub_video(monkeypatch, events, *, language="en", duration=600, title="T"):
-    monkeypatch.setattr(tk, "probe", lambda url, proxy=None: {
+    monkeypatch.setattr(tk, "probe", lambda url, proxy=None, cookies=None: {
         "title": title, "id": "vid12345678", "language": language, "duration": duration,
         "subtitles": {"en": [{"ext": "json3", "url": "http://j"}]},
         "automatic_captions": {}})
@@ -711,7 +776,7 @@ def test_cli_keeps_going_after_one_video_fails(monkeypatch, tmp_path, capsys):
     """A private video in the middle of a playlist must not lose the other 199."""
     calls = []
 
-    def flaky(url, lang=None, proxy=None, target=tk.TARGET_WORDS):
+    def flaky(url, lang=None, proxy=None, target=tk.TARGET_WORDS, cookies=None):
         calls.append(url)
         if url == "http://bad":
             raise LookupError("video unavailable")
@@ -743,7 +808,8 @@ def test_cli_error_exits_nonzero(monkeypatch, capsys):
 
 def test_cli_expands_a_playlist(monkeypatch, tmp_path):
     seen = []
-    monkeypatch.setattr(tk, "expand", lambda u, proxy=None: ["http://a", "http://b", "http://c"])
+    monkeypatch.setattr(tk, "expand",
+                        lambda u, proxy=None, cookies=None: ["http://a", "http://b", "http://c"])
     monkeypatch.setattr(tk, "transcript",
                         lambda url, *a, **k: seen.append(url) or doc(title=url[-1]))
     monkeypatch.setattr(tk.time, "sleep", lambda s: None)
@@ -762,7 +828,7 @@ def test_cli_paces_itself_between_videos(monkeypatch, tmp_path):
 
 
 def test_list_shows_tracks_and_the_pick(monkeypatch, capsys):
-    monkeypatch.setattr(tk, "probe", lambda url, proxy=None: {
+    monkeypatch.setattr(tk, "probe", lambda url, proxy=None, cookies=None: {
         "title": "T", "language": "en",
         "subtitles": {"en": [], "de": []},
         "automatic_captions": {"en": [], "en-orig": [], "fr": []}})
@@ -772,16 +838,27 @@ def test_list_shows_tracks_and_the_pick(monkeypatch, capsys):
 
 
 def test_list_of_a_video_with_nothing_to_pick_still_succeeds(monkeypatch, capsys):
-    """Listing answered the question; "there is no English track" is the answer."""
-    monkeypatch.setattr(tk, "probe", lambda url, proxy=None: {
-        "title": "T", "language": "de", "subtitles": {"de": []}, "automatic_captions": {}})
+    """Listing answered the question; "there is nothing I'd pick" is the answer.
+
+    Needs a video whose tracks are in neither English nor the spoken language,
+    now that the spoken language is a fallback.
+    """
+    monkeypatch.setattr(tk, "probe", lambda url, proxy=None, cookies=None: {
+        "title": "T", "language": "ja", "subtitles": {"de": []}, "automatic_captions": {}})
     assert tk._list("http://x") == 0
     assert "-> (none)" in capsys.readouterr().out
 
 
+def test_list_shows_the_native_fallback_pick(monkeypatch, capsys):
+    monkeypatch.setattr(tk, "probe", lambda url, proxy=None, cookies=None: {
+        "title": "T", "language": "de", "subtitles": {"de": []}, "automatic_captions": {}})
+    tk._list("http://x")
+    assert "-> de (manual)" in capsys.readouterr().out
+
+
 def test_list_of_an_unavailable_video_fails(monkeypatch, capsys):
     monkeypatch.setattr(tk, "probe",
-                        lambda url, proxy=None: (_ for _ in ()).throw(LookupError("private video")))
+                        lambda url, proxy=None, cookies=None: (_ for _ in ()).throw(LookupError("private video")))
     assert tk._list("http://x") == 1
     assert "private video" in capsys.readouterr().err
 
@@ -1001,10 +1078,80 @@ def test_persistent_429_raises_rate_limited(monkeypatch, no_sleep):
         tk._get("http://j")
 
 
+# --------------------------------------------------------------------------
+# cookies, --force, --version
+# --------------------------------------------------------------------------
+
+def test_no_cookies_means_no_yt_dlp_options():
+    assert tk._cookie_opts(None) == {}
+    assert tk._cookie_opts("") == {}
+
+
+def test_a_browser_name_becomes_cookiesfrombrowser():
+    assert tk._cookie_opts("firefox") == {"cookiesfrombrowser": ("firefox", None, None, None)}
+
+
+def test_a_browser_profile_is_split_off():
+    got = tk._cookie_opts("chrome:Profile 1")
+    assert got == {"cookiesfrombrowser": ("chrome", "Profile 1", None, None)}
+
+
+def test_an_existing_path_becomes_a_cookie_file(tmp_path):
+    jar = tmp_path / "cookies.txt"
+    jar.write_text("# Netscape HTTP Cookie File")
+    assert tk._cookie_opts(str(jar)) == {"cookiefile": str(jar)}
+
+
+def test_cookies_reach_the_extraction(monkeypatch):
+    """The --proxy lesson: an option the CLI accepts and never passes on is worse
+    than one it doesn't offer."""
+    seen = {}
+    monkeypatch.setattr(tk, "_extract", lambda url, **k: seen.update(k) or {"id": "x"})
+    tk.probe("http://x", None, "firefox")
+    assert seen["cookiesfrombrowser"] == ("firefox", None, None, None)
+
+
+def test_cookies_reach_the_playlist_expansion(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(tk, "_extract", lambda url, **k: seen.update(k) or {
+        "_type": "playlist", "entries": [{"url": "http://a"}]})
+    tk.expand("https://www.youtube.com/playlist?list=PL", None, "firefox")
+    assert "cookiesfrombrowser" in seen
+
+
+def test_cli_passes_cookies_through(monkeypatch, tmp_path):
+    got = {}
+
+    def spy(url, lang=None, proxy=None, target=None, cookies=None):
+        got["cookies"] = cookies
+        return doc()
+
+    monkeypatch.setattr(tk, "transcript", spy)
+    tk.main(["http://x", "-o", str(tmp_path / "o.md"), "--cookies", "firefox"])
+    assert got["cookies"] == "firefox"
+
+
+def test_force_overrides_skip_existing(monkeypatch, tmp_path):
+    """Captions do get corrected; --skip-existing alone would keep the old file."""
+    (tmp_path / "old-vid12345678.md").write_text("stale")
+    calls = []
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: calls.append(url) or doc())
+    tk.main(["https://youtu.be/vid12345678", "-o", str(tmp_path),
+             "--skip-existing", "--force"])
+    assert len(calls) == 1
+
+
+def test_version_is_reported(capsys):
+    with pytest.raises(SystemExit) as caught:
+        tk.main(["--version"])
+    assert caught.value.code == 0
+    assert "transkrp" in capsys.readouterr().out
+
+
 def test_cli_passes_the_word_target_through(monkeypatch, tmp_path):
     got = {}
 
-    def spy(url, lang=None, proxy=None, target=None):
+    def spy(url, lang=None, proxy=None, target=None, cookies=None):
         got["target"], got["proxy"] = target, proxy
         return doc()
 

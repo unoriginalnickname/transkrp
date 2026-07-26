@@ -1,1 +1,4 @@
-yt-dlp>=2026.7.4
+# Dependencies live in pyproject.toml; this file points at it so the two can't
+# drift. `pip install -r requirements.txt` and `pip install .` install the same
+# thing.
+-e .

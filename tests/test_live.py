@@ -45,11 +45,21 @@ def _fetch(*args, **kwargs):
 
 
 def _skip_if_environmental(e):
+    """Rate limits, dead network, and a fixture video that no longer exists.
+
+    All three mean "we learned nothing", not "the code broke". A pulled video is
+    the sneakiest: without this the suite fails with assertion errors that read
+    exactly like a regression, and someone spends an hour on it.
+    """
     msg = str(e).lower()
     for signal in ("rate-limited", "timed out", "429", "temporary failure",
                    "getaddrinfo", "connection", "unreachable"):
         if signal in msg:
             pytest.skip(f"environment, not a regression: {e}")
+    for signal in ("unavailable", "private video", "removed", "terminated",
+                   "does not exist", "no longer available"):
+        if signal in msg:
+            pytest.skip(f"fixture video is gone, not a regression - pick a new one: {e}")
 
 
 @pytest.fixture(scope="session")
