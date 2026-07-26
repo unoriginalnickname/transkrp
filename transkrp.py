@@ -9,8 +9,9 @@ Library:
     t["paragraphs"][0]["text"]
 
 yt-dlp does the fetching and already prefers manual captions over auto ones.
-This adds the two things it doesn't do: drop the scroll-duplicate events in
-auto-captions, and reflow cues into readable paragraphs.
+This adds what it doesn't do: read the json3 format, which unlike .vtt doesn't
+repeat every phrase as the caption box scrolls, and reflow the cues into
+readable paragraphs.
 """
 
 from __future__ import annotations
@@ -255,9 +256,17 @@ def segments(info: dict, source: str, key: str, proxy: str | None = None) -> lis
 
     out = []
     for e in events:
-        # aAppend events hold only a newline. They drive the scrolling two-line
-        # display and repeat text already emitted; keeping them triples the
-        # transcript. This is why naive .vtt scraping produces duplicates.
+        # aAppend events drive the scrolling two-line display — the same
+        # animation that makes a naive .vtt strip repeat every phrase two or
+        # three times. But json3 expresses it as an append of a bare newline
+        # instead of re-emitting the text, so the duplication never arrives here
+        # at all (measured across three videos: 1371 of 2744 events on an
+        # hour-long lecture, not one of them carrying a word).
+        #
+        # Which makes this check belt-and-braces: `if text` below would drop them
+        # anyway. It stays because aAppend *means* "a continuation of what's
+        # already on screen", and a track that ever put words in one would
+        # duplicate silently. Cheap, and it states the intent. See ADR 0002.
         if e.get("aAppend") == 1 or not e.get("segs"):
             continue
         text = _clean("".join(s.get("utf8", "") for s in e["segs"])).strip()

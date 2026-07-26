@@ -86,14 +86,19 @@ preferring manual captions over auto ones by itself. But it gives you a subtitle
 file, not a transcript: cues broken mid-sentence, HTML entities, a timestamp
 every three seconds.
 
-For auto-captions it's worse than cosmetic. The `.vtt` repeats each line as the
-two-line display scrolls, so a naive strip produced **14,514 words against this
-tool's 4,884** on the same talk — every phrase three times, invisible unless you
-count. This reads the `json3` format instead, where the scroll-repeat events are
-explicitly flagged, so removing them is exact rather than a guess.
+For auto-captions it's worse than cosmetic. The `.vtt` re-serialises the whole
+two-line caption box every time it scrolls, so a naive strip produced **14,514
+words against this tool's 4,884** on the same talk — every phrase three times,
+invisible unless you count.
 
-So: yt-dlp fetches; this drops the scroll-duplicates, splits speaker turns, and
-reflows cues into paragraphs.
+This reads the `json3` format instead, which represents that scroll as an append
+of a newline rather than by repeating the text. The duplication is absent by
+construction; there's no dedup heuristic here to get wrong, and no threshold to
+tune. (Tools that do strip `.vtt` have to guess, and a speaker who genuinely
+repeats themselves is indistinguishable from the artifact.)
+
+So: yt-dlp fetches; this reads a format that doesn't duplicate, splits speaker
+turns, and reflows cues into paragraphs.
 
 `youtube-transcript-api` is a fine alternative — it handles the duplication too,
 and produces byte-identical segment text (verified: 676 segments, 0 differences).

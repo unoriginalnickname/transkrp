@@ -1,6 +1,6 @@
 # 0002. Read json3, not vtt
 
-- Status: Accepted
+- Status: Accepted (with a correction, 2026-07-26 — see the end)
 - Date: 2026-07-16 (recorded 2026-07-26)
 
 ## Context
@@ -46,3 +46,35 @@ Read `json3`. Skip any event with `aAppend == 1` or no `segs`.
   `_UnsafeExtensionError`. That bug is in yt-dlp's *file writing* — it refuses to
   create `de.json3` on disk. We never ask yt-dlp to write a file (see
   [0003](0003-fetch-caption-urls-ourselves.md)), so it does not apply here.
+
+## Correction, 2026-07-26
+
+The decision stands; the mechanism described above was wrong, and it was wrong in
+a way that made the code look more load-bearing than it is.
+
+Trying to prove the live smoke tests could actually detect a dedup regression, I
+disabled the `aAppend` filter and the tests still passed. They were right to:
+**disabling it changes nothing.** Measured across three videos — 1371 of 2744
+events on the hour-long lecture, 51 of 104, 499 of 1000 — *no `aAppend` event
+carries a single word.* Every one holds exactly `"\n"`, so the `if text:` guard
+downstream already drops them.
+
+So json3 does not "flag the duplicate text for removal". json3 **never emits the
+duplicate text**. The scroll animation is expressed as an append of a newline to
+the existing window, where `.vtt` re-serialises the whole visible box every time
+it changes. The 14,514-vs-4,884 word gap is real, but it is a fact about `.vtt`,
+not a repair we perform on json3.
+
+What follows:
+
+- Choosing json3 over vtt is still right, and for a stronger reason than the one
+  originally written down: the duplication is absent by construction rather than
+  removed by a filter we have to keep correct.
+- The `aAppend` check stays anyway. It costs nothing, it documents what the field
+  means, and a track that ever did put words in an append would otherwise
+  duplicate silently. It is a guard, not the mechanism.
+- The claim that "keeping them triples the transcript" is false for json3 and has
+  been corrected in the code comment and the README.
+- Generalise carefully from three videos. That sample is enough to know the
+  filter is inert today, not enough to know YouTube will never use `aAppend`
+  differently — which is exactly why the guard is cheap insurance.
