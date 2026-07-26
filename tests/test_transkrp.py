@@ -123,6 +123,54 @@ def test_track_without_json3_format(monkeypatch):
 # _clean
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# the duplication detector the live canary relies on
+# --------------------------------------------------------------------------
+
+PROSE = ("the uniform code of military justice specifies court martial for any "
+         "officer who sends a soldier into battle without a weapon there ought "
+         "to be a similar protection for students because students should not go "
+         "out into life without the ability to communicate")
+
+
+def repetition(text, n=3):
+    """Fraction of n-grams that repeat an earlier one.
+
+    Lives here, in the offline suite, because this is where it can be verified —
+    tests/test_live.py imports it to use as a canary against real captions.
+    """
+    words = text.lower().split()
+    grams = [tuple(words[i:i + n]) for i in range(len(words) - n + 1)]
+    return 1 - len(set(grams)) / len(grams) if grams else 0.0
+
+
+def scrolled(text, times=3):
+    """Re-serialise text the way a .vtt scroll does: each phrase, repeatedly."""
+    words = text.split()
+    out = []
+    for i in range(0, len(words), 4):
+        for _ in range(times):
+            out.extend(words[i:i + 4])
+    return " ".join(out)
+
+
+def test_repetition_detects_scroll_duplication():
+    """The live canary asserts repetition() stays below 0.20. Prove it moves."""
+    assert repetition(PROSE) < 0.20
+    assert repetition(scrolled(PROSE)) > 0.20
+
+
+def test_repetition_tolerates_a_verbal_tic():
+    """A speaker with a catchphrase must not trip the canary."""
+    tic = " ".join(f"{w} you know" if i % 7 == 0 else w
+                   for i, w in enumerate(PROSE.split()))
+    assert repetition(tic) < 0.20
+
+
+def test_repetition_of_too_little_text():
+    assert repetition("one two") == 0.0
+
+
 def test_clean_normalises_lookalike_typography():
     """U+2011 and U+00A0 read as a hyphen and a space but don't match one."""
     assert tk._clean("real‑time systems​") == "real-time systems"
