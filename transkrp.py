@@ -415,6 +415,13 @@ def _split_turns(segs: list[tuple[int, int, str]]) -> list[tuple[int, int, str, 
     Returns the segments with a `starts_turn` flag. '>>' is the caption
     convention for "a different person is talking now" — it says the speaker
     changed, not who they are, so we keep the boundary and claim nothing more.
+
+    Measured on a 5,180-cue congressional hearing: 474 cues carry '>>' and every
+    single one has it at the start, so the mid-cue split below never fires in
+    practice. Kept because a marker mid-cue would otherwise put two speakers in
+    one paragraph silently, and the cost of the branch is nothing. Anyone
+    tempted to "fix" the parts sharing a timestamp: they don't, because there is
+    never more than one.
     """
     out = []
     for s_ms, e_ms, text in segs:
@@ -473,7 +480,8 @@ def paragraphs(segs: list[tuple[int, int, str]], punctuated: bool | None = None,
 
 
 def transcript(url: str, lang: str | None = None, proxy: str | None = None,
-               target: int = TARGET_WORDS, cookies: str | None = None) -> dict:
+               target: int = TARGET_WORDS, cookies: str | None = None,
+               segments_too: bool = False) -> dict:
     """Fetch a transcript. The one call another system needs.
 
     Returns a JSON-safe dict:
@@ -519,6 +527,10 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
             for ms, turn, text in paras
         ],
         "text": " ".join(text for _, _, text in paras),
+        # Off by default: a long video has thousands of cues, which would treble
+        # the size of a JSON dump that most callers only want paragraphs from.
+        **({"segments": [{"start_ms": s, "end_ms": e, "text": txt}
+                         for s, e, txt in segs]} if segments_too else {}),
     }
 
 
@@ -557,6 +569,57 @@ def to_markdown(t: dict) -> str:
     return "\n".join(head) + f"\n\n# {t['title']}\n\n" + "\n\n".join(lines) + "\n"
 
 
+def to_srt(t: dict) -> str:
+    """A subtitle file from the cleaned cues.
+
+    Worth having even though yt-dlp will hand you a .vtt directly: that one is
+    the scrolling two-line box serialised frame by frame, so every phrase appears
+    two or three times. These cues came from json3, which doesn't do that, and
+    they have had the lookalike typography normalised. Same subtitles, without
+    the triplication.
+    """
+    out = []
+    for i, (start, end, text) in enumerate(_cues(t), 1):
+        out.append(f"{i}\n{_ts(start, ',')} --> {_ts(end, ',')}\n{text}\n")
+    return "\n".join(out)
+
+
+def to_vtt(t: dict) -> str:
+    body = "\n".join(f"{_ts(s, '.')} --> {_ts(e, '.')}\n{text}\n"
+                     for s, e, text in _cues(t))
+    return f"WEBVTT\n\n{body}"
+
+
+def _cues(t: dict) -> list[tuple[int, int, str]]:
+    """Cue timings fit for a subtitle file.
+
+    json3 durations overlap and occasionally collapse to zero, which players
+    render as a flicker or a caption that never leaves. Truncate each cue at the
+    next one's start and give a zero-length cue somewhere to live.
+    """
+    segs = t.get("segments")
+    if segs is None:
+        raise LookupError("this transcript has no segments; fetch it with "
+                          "segments=True (the CLI does this for --format srt/vtt)")
+    fixed = []
+    for i, s in enumerate(segs):
+        start, end = s["start_ms"], s["end_ms"]
+        nxt = segs[i + 1]["start_ms"] if i + 1 < len(segs) else None
+        if nxt is not None and end > nxt:
+            end = nxt
+        fixed.append((start, max(end, start + 1), s["text"]))
+    return fixed
+
+
+def _ts(ms: int, frac: str) -> str:
+    """SRT wants 00:00:01,234 and WebVTT wants 00:00:01.234."""
+    ms = max(int(ms), 0)
+    s, ms = divmod(ms, 1000)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}{frac}{ms:03d}"
+
+
 def stamp(ms: int) -> str:
     t = ms // 1000
     return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t % 3600 // 60:02d}:{t % 60:02d}"
@@ -575,8 +638,10 @@ def _version() -> str:
         return "(from source)"
 
 
-def render(t: dict, as_json: bool) -> str:
-    return json.dumps(t, indent=2, ensure_ascii=False) if as_json else to_markdown(t)
+def render(t: dict, fmt: str) -> str:
+    if fmt == "json":
+        return json.dumps(t, indent=2, ensure_ascii=False)
+    return {"md": to_markdown, "srt": to_srt, "vtt": to_vtt}[fmt](t)
 
 
 def _already_written(url: str, out_dir: str | None, explicit: str | None,
@@ -626,7 +691,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lang", metavar="KEY",
                     help="force a track key (e.g. en-orig), or 'auto' for the "
                          "language the video is actually in")
-    ap.add_argument("--json", action="store_true", help="emit JSON instead of markdown")
+    ap.add_argument("-f", "--format", choices=("md", "json", "srt", "vtt"), default="md",
+                    help="output format (default md); srt and vtt emit the cleaned "
+                         "cues, without the scroll-duplication a .vtt from YouTube has")
+    ap.add_argument("--json", action="store_true", help="shorthand for --format json")
     ap.add_argument("--list", action="store_true", help="show available tracks and exit")
     ap.add_argument("--proxy", metavar="URL", help="route both requests through a proxy; "
                                                    "YouTube blocks datacenter IPs")
@@ -663,7 +731,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         return max((_list(u, args.proxy, args.cookies) for u in urls), default=0)
 
-    ext = "json" if args.json else "md"
+    # --json is the old spelling; --format is the general one.
+    fmt = "json" if args.json else args.format
+    ext = fmt
     to_stdout = args.out == "-"
     # One video keeps the old contract: -o is the file. Several need somewhere to
     # put them, so -o becomes the directory — silently overwriting one file with
@@ -701,7 +771,8 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(1)
         fetched = True
         try:
-            t = transcript(url, args.lang, args.proxy, args.words, args.cookies)
+            t = transcript(url, args.lang, args.proxy, args.words, args.cookies,
+                           segments_too=fmt in ("srt", "vtt"))
         except RateLimited as e:
             # Every remaining video will fail the same way, and asking makes the
             # block worse. Stop and say how to pick up where this left off.
@@ -721,10 +792,10 @@ def main(argv: list[str] | None = None) -> int:
         if to_stdout:
             # Keep JSON as objects: several documents concatenated are not JSON,
             # so they have to be assembled into one array at the end.
-            docs.append(t if args.json else to_markdown(t))
+            docs.append(t if fmt == "json" else render(t, fmt))
             continue
 
-        doc = render(t, args.json)
+        doc = render(t, fmt)
         name = f"{slug(t['title'], t['video_id'])}.{ext}"
         out = os.path.join(out_dir, name) if out_dir else (args.out or name)
         try:
@@ -733,12 +804,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: cannot write {out!r}: {e.strerror}", file=sys.stderr)
             failed += 1
             continue
+        # Count the unit the file actually contains: a .srt has cues, not
+        # paragraphs, and reporting 99 paragraphs for a 1166-cue file is a lie.
+        n, unit = ((len(t["segments"]), "cues") if fmt in ("srt", "vtt")
+                   else (len(t["paragraphs"]), "paragraphs"))
         print(f"{t['title']}\n  {t['lang']} ({t['source']})"
               f"{' [machine-translated]' if t['translated'] else ''}"
-              f"\n  wrote {out} ({len(t['paragraphs'])} paragraphs)", file=sys.stderr)
+              f"\n  wrote {out} ({n} {unit})", file=sys.stderr)
 
     if to_stdout and docs:
-        print(_stdout_doc(docs, args.json))
+        print(_stdout_doc(docs, fmt == "json"))
     if len(urls) > 1:
         parts = [f"{done} written"]
         if skipped:

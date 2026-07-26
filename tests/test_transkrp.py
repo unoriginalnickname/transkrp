@@ -678,6 +678,85 @@ def test_markdown_omits_turns_when_nobody_takes_one():
     assert "turns:" not in tk.to_markdown(doc(turns=1))
 
 
+# --------------------------------------------------------------------------
+# subtitle output
+# --------------------------------------------------------------------------
+
+def cued(*segs):
+    return doc(segments=[{"start_ms": s, "end_ms": e, "text": t} for s, e, t in segs])
+
+
+@pytest.mark.parametrize("ms,want", [
+    (0, "00:00:00,000"), (1234, "00:00:01,234"), (61_000, "00:01:01,000"),
+    (3_723_456, "01:02:03,456"), (-5, "00:00:00,000"),
+])
+def test_srt_timestamps(ms, want):
+    assert tk._ts(ms, ",") == want
+
+
+def test_webvtt_uses_a_dot():
+    assert tk._ts(1234, ".") == "00:00:01.234"
+
+
+def test_srt_shape():
+    out = tk.to_srt(cued((0, 1500, "Hello there."), (1500, 3000, "General Kenobi.")))
+    assert out.startswith("1\n00:00:00,000 --> 00:00:01,500\nHello there.\n")
+    assert "2\n00:00:01,500 --> 00:00:03,000\nGeneral Kenobi.\n" in out
+
+
+def test_vtt_has_its_header():
+    assert tk.to_vtt(cued((0, 1000, "hi"))).startswith("WEBVTT\n\n")
+
+
+def test_overlapping_cues_are_truncated():
+    """json3 durations overlap; a player renders that as a caption that lingers."""
+    out = tk.to_srt(cued((0, 5000, "first"), (1000, 2000, "second")))
+    assert "00:00:00,000 --> 00:00:01,000" in out  # cut at the next cue's start
+
+
+def test_a_zero_length_cue_still_gets_a_moment():
+    """Exactly-equal start and end renders as a flicker or not at all."""
+    out = tk.to_srt(cued((1000, 1000, "blink")))
+    assert "00:00:01,000 --> 00:00:01,001" in out
+
+
+def test_subtitle_output_without_segments_says_so():
+    """Rather than a KeyError from somewhere in the formatter."""
+    with pytest.raises(LookupError, match="segments"):
+        tk.to_srt(doc())
+
+
+def test_segments_are_off_by_default(monkeypatch):
+    """Thousands of cues would treble a JSON dump most callers don't want."""
+    stub_video(monkeypatch, [ev(0, 1000, "Hello.")])
+    assert "segments" not in tk.transcript("http://x")
+
+
+def test_segments_are_included_on_request(monkeypatch):
+    stub_video(monkeypatch, [ev(0, 1000, "Hello."), ev(1000, 500, "Again.")])
+    t = tk.transcript("http://x", segments_too=True)
+    assert t["segments"] == [{"start_ms": 0, "end_ms": 1000, "text": "Hello."},
+                             {"start_ms": 1000, "end_ms": 1500, "text": "Again."}]
+
+
+@pytest.mark.parametrize("fmt,check", [
+    ("srt", lambda s: s.startswith("1\n")),
+    ("vtt", lambda s: s.startswith("WEBVTT")),
+])
+def test_cli_writes_subtitles(monkeypatch, tmp_path, fmt, check):
+    stub_video(monkeypatch, [ev(0, 1000, "Hello."), ev(1000, 900, "Bye.")], title="Talk")
+    monkeypatch.chdir(tmp_path)
+    assert tk.main(["http://x", "-f", fmt]) == 0
+    assert check((tmp_path / f"talk-vid12345678.{fmt}").read_text(encoding="utf-8"))
+
+
+def test_json_flag_still_means_format_json(monkeypatch, capsys):
+    """The old spelling has to keep working."""
+    stub_video(monkeypatch, [ev(0, 1000, "Hello.")])
+    tk.main(["http://x", "-o", "-", "--json"])
+    assert isinstance(json.loads(capsys.readouterr().out), dict)
+
+
 def test_markdown_ends_with_a_newline():
     assert tk.to_markdown(doc()).endswith("\n")
 
@@ -776,7 +855,7 @@ def test_cli_keeps_going_after_one_video_fails(monkeypatch, tmp_path, capsys):
     """A private video in the middle of a playlist must not lose the other 199."""
     calls = []
 
-    def flaky(url, lang=None, proxy=None, target=tk.TARGET_WORDS, cookies=None):
+    def flaky(url, lang=None, proxy=None, target=tk.TARGET_WORDS, cookies=None, segments_too=False):
         calls.append(url)
         if url == "http://bad":
             raise LookupError("video unavailable")
@@ -1122,7 +1201,7 @@ def test_cookies_reach_the_playlist_expansion(monkeypatch):
 def test_cli_passes_cookies_through(monkeypatch, tmp_path):
     got = {}
 
-    def spy(url, lang=None, proxy=None, target=None, cookies=None):
+    def spy(url, lang=None, proxy=None, target=None, cookies=None, segments_too=False):
         got["cookies"] = cookies
         return doc()
 
@@ -1151,7 +1230,7 @@ def test_version_is_reported(capsys):
 def test_cli_passes_the_word_target_through(monkeypatch, tmp_path):
     got = {}
 
-    def spy(url, lang=None, proxy=None, target=None, cookies=None):
+    def spy(url, lang=None, proxy=None, target=None, cookies=None, segments_too=False):
         got["target"], got["proxy"] = target, proxy
         return doc()
 

@@ -20,7 +20,8 @@ Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
 ```
 -o PATH          output file, or a directory (several videos, or a trailing /)
 -o -             stdout
---json           JSON instead of markdown
+-f, --format     md (default), json, srt, vtt
+--json           shorthand for --format json
 --list           show the caption tracks and exit
 --lang KEY       force a track (e.g. en-orig), or 'auto' for the spoken language
 --words N        target paragraph length (default 110)
@@ -77,6 +78,20 @@ things you're not going to do or bother investigating...
 `>>` marks a speaker change — the standard caption convention. It says the
 speaker *changed*, not who they are; the tracks don't carry names, so neither
 does this.
+
+## Subtitle files
+
+`-f srt` and `-f vtt` emit the cleaned cues rather than paragraphs — a real
+subtitle file you can load in a player.
+
+Worth having even though yt-dlp hands you a `.vtt` directly, because that one is
+the scrolling caption box serialised frame by frame. Measured on the same
+auto-caption track: **26,402 words from yt-dlp's `.vtt`, 9,086 from ours — 2.9×**.
+Same subtitles, without every phrase three times, and with the lookalike
+typography normalised.
+
+Overlapping cues are truncated at the next cue's start, and zero-length ones are
+given a millisecond, so players don't flicker or leave a caption stuck on screen.
 
 ## Frontmatter
 

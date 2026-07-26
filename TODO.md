@@ -18,14 +18,20 @@ background research in
   attribution, but a hostile repackaging of someone's library is a bad way to
   exist.
 
-- [ ] **Split speaker turns share a timestamp.** `_split_turns` splits a segment
-  at `>>` but gives every resulting part the same start/end ms, so in a rapid
-  exchange all the turns from one cue carry the same anchor. Interpolating across
-  the cue by word count would be closer to the truth. Worth confirming it's
-  visible in real output before touching it.
+- [ ] **An explicit `--translate LANG`.** YouTube will machine-translate its ASR
+  into ~150 languages and we deliberately avoid those (see track selection), but
+  there's no way to *ask* for one. `youtube-transcript-api` exposes this as
+  `.translate()`. Worth having as an explicit opt-in, flagged in the frontmatter
+  the way it already is when one is chosen by hand.
 
-- [ ] **SRT / WebVTT output.** The one genuinely common request this can't serve.
-  We already have the segments; it's a formatter, not a fetch.
+## Checked and closed without a change
+
+- **Split speaker turns sharing a timestamp** was on this list as a minor
+  accuracy bug. Measured on a 5,180-cue congressional hearing: 474 cues carry
+  `>>` and **every one has it at the start**, so the mid-cue split never fires
+  and no two parts ever share a timestamp. The branch stays as a cheap guard;
+  there is nothing to fix. (Second time this session that defensive code turned
+  out not to be load-bearing — the first was the `aAppend` filter, ADR 0002.)
 
 ## Not doing, and why
 
