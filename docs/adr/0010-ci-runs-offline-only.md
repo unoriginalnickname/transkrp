@@ -48,6 +48,12 @@ document.
   cost, and it is accepted knowingly rather than papered over with a job that
   cries wolf. The mitigation is that the live suite is one command, takes five
   seconds, and is the first thing to run when something looks wrong.
+- What *is* covered in CI is everything up to YouTube's own behaviour.
+  `tests/test_http.py` serves real HTTP from localhost — 429s, `Retry-After`,
+  stalled reads, an empty 200 — so the rate-limit and transport paths are
+  exercised over a real socket rather than a mocked opener, without needing a
+  network or a datacenter IP. That was the only part of the failure handling
+  previously taken on faith.
 - If this ever justifies a proxy subscription, a scheduled workflow with a
   `PROXY_URL` secret and `--proxy` is the shape of the answer — the flag already
   routes both the extraction and the caption fetch.

@@ -232,7 +232,8 @@ def _get(url: str, tries: int = 4, proxy: str | None = None) -> bytes:
                 return r.read()
         except urllib.error.HTTPError as e:  # a subclass of URLError; catch first
             if e.code in (429, 500, 502, 503) and attempt < last:
-                time.sleep(_backoff(attempt))
+                # A server that says when to come back beats our guess.
+                time.sleep(_retry_after(e) or _backoff(attempt))
                 continue
             if e.code == 429:
                 raise RateLimited("YouTube rate-limited the caption fetch (429) - "
@@ -255,6 +256,25 @@ def _get(url: str, tries: int = 4, proxy: str | None = None) -> bytes:
                 continue
             raise LookupError(f"caption fetch timed out after {TIMEOUT}s") from e
     raise LookupError("caption fetch failed after retries")
+
+
+MAX_RETRY_AFTER = 60  # past this, waiting is worse than telling the user to retry
+
+
+def _retry_after(err: urllib.error.HTTPError) -> float | None:
+    """Seconds the server asked us to wait, if it asked and the answer is sane.
+
+    RFC 9110 allows either a delay in seconds or an HTTP-date. Only the numeric
+    form is honoured: the date form needs the server's clock, and a skewed one
+    would park the process for hours. Capped for the same reason — a
+    `Retry-After: 3600` is information, not an instruction to hang for an hour.
+    """
+    value = (err.headers or {}).get("Retry-After") if hasattr(err, "headers") else None
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return min(seconds, MAX_RETRY_AFTER) if seconds > 0 else None
 
 
 def _backoff(attempt: int) -> float:

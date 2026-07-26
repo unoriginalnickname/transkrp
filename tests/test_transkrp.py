@@ -395,6 +395,21 @@ def test_rate_limit_is_retried_then_succeeds(monkeypatch, no_sleep):
     assert len(no_sleep) == 2
 
 
+@pytest.mark.parametrize("value,want", [
+    ("30", 30.0),
+    (" 5 ", 5.0),
+    ("3600", float(tk.MAX_RETRY_AFTER)),   # capped, not obeyed
+    ("0", None),                           # "come back immediately" is not a wait
+    ("-5", None),
+    ("Wed, 21 Oct 2026 07:28:00 GMT", None),  # HTTP-date form, deliberately ignored
+    (None, None),                          # header absent
+])
+def test_retry_after_parsing(value, want):
+    headers = {"Retry-After": value} if value is not None else {}
+    err = urllib.error.HTTPError("http://j", 429, "slow down", headers, None)
+    assert tk._retry_after(err) == want
+
+
 def test_backoff_grows(no_sleep):
     assert tk._backoff(0) < tk._backoff(2) < tk._backoff(4)
 
