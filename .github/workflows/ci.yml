@@ -19,9 +19,11 @@ jobs:
         python: ["3.10", "3.13"]
 
     steps:
-      - uses: actions/checkout@v4
+      # v5/v6 rather than v4/v5: the older majors target Node 20, which the
+      # runners now force onto Node 24 with a deprecation warning.
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
