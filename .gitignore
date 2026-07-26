@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
-*.md
-!README.md
-*.json
 .venv/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+
+# Transcripts land in the working directory. Ignore them at the root only —
+# a blanket *.md would swallow docs/adr/.
+/*.md
+/*.json
+!/README.md
