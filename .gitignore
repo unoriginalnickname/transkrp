@@ -11,3 +11,4 @@ dist/
 /*.md
 /*.json
 !/README.md
+!/TODO.md
