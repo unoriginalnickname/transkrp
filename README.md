@@ -8,14 +8,33 @@ pip install -r requirements.txt
 python transkrp.py "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-Writes `<title-slug>-<video_id>.md`. Options: `-o PATH` (or `-o -` for stdout),
-`--json`, `--list` to see the caption tracks, `--lang KEY` to force one.
+Writes `<title-slug>-<video_id>.md`.
+
+```
+-o PATH        output file, or a directory when there are several videos
+-o -           stdout
+--json         JSON instead of markdown
+--list         show the caption tracks and exit
+--lang KEY     force a track (e.g. en-orig)
+--words N      target paragraph length (default 110)
+--proxy URL    route both requests through a proxy
+```
+
+Several videos at once, and playlists and channels expand:
+
+```
+python transkrp.py "https://www.youtube.com/playlist?list=..." -o ./notes/
+```
+
+A video shared from inside a playlist (`watch?v=X&list=Y`) is treated as that one
+video, not the playlist around it. One failure doesn't stop the run — the error
+goes to stderr and the rest continue.
 
 As a library:
 
 ```python
 from transkrp import transcript
-t = transcript(url)          # JSON-safe dict
+t = transcript(url)          # JSON-safe dict; raises LookupError on failure
 t["paragraphs"][0]["text"]
 ```
 
@@ -71,7 +90,7 @@ For auto-captions it's worse than cosmetic. The `.vtt` repeats each line as the
 two-line display scrolls, so a naive strip produced **14,514 words against this
 tool's 4,884** on the same talk — every phrase three times, invisible unless you
 count. This reads the `json3` format instead, where the scroll-repeat events are
-explicitly flagged.
+explicitly flagged, so removing them is exact rather than a guess.
 
 So: yt-dlp fetches; this drops the scroll-duplicates, splits speaker turns, and
 reflows cues into paragraphs.
@@ -85,6 +104,27 @@ need a second fetch.
 
 - No captions, no output.
 - Speaker changes are marked, but speakers aren't named — the tracks don't say.
+  Naming them means diarizing the audio, which is a different tool.
 - ASR mangles proper nouns. The timestamps are there so anything load-bearing can
   be checked against the audio.
-- YouTube rate-limits datacenter IPs. Fine from a laptop, flaky from a cloud box.
+- YouTube rate-limits caption pulls per IP (a few hundred an hour) and blocks
+  datacenter ranges outright. Fine from a laptop; from a cloud box you'll need
+  `--proxy` with a residential endpoint.
+- Paragraphs are reading units, not RAG chunks. `--words 250` gets you closer to
+  chunk-shaped; every paragraph carries `start_ms` and `turn` so a consumer can
+  group them itself.
+
+## Development
+
+```
+python -m pytest tests/ -q
+```
+
+93 tests, no network — the caption fetch is stubbed at `_get`. They cover the
+things that go wrong quietly: scroll-duplicate removal, the paragraph break
+rules, punctuation detection, the retry policy, and the empty-body response that
+means a PO token is needed.
+
+Design decisions that aren't obvious from the code are in
+[docs/adr/](docs/adr/README.md) — including why `json3` and not `vtt`, and why
+speakers aren't named.
