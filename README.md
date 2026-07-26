@@ -139,14 +139,21 @@ need a second fetch.
 
 ```
 pip install -e ".[dev]"
-python -m pytest -q          # 128 offline tests, no network
+python -m pytest -q          # 150 offline tests, no network
 python -m pytest -m network  # 12 live tests, really hits YouTube
 ```
 
-The offline tests stub the caption fetch at `_get` and cover the things that go
-wrong quietly: the paragraph break rules, punctuation detection, the retry
-policy, batch resume, and the empty-body response that means a PO token is
-needed.
+Offline tests come in two kinds. Most stub the caption fetch at `_get` and cover
+the things that go wrong quietly: the paragraph break rules, punctuation
+detection, the retry policy, batch resume, and the empty-body response that means
+a PO token is needed.
+
+The rest (`tests/test_http.py`) run against a real HTTP server on localhost, so
+the rate-limit path is *observed* rather than assumed — a genuine 429 off a
+socket, real `urllib`, real timeouts, and the batch run giving up and printing
+how to resume. The alternative, provoking YouTube into really rate-limiting you,
+costs a home IP that can't fetch transcripts for hours in exchange for one test
+run.
 
 The live ones are the ones that matter when something breaks — the offline suite
 will happily report 128 green while the tool is completely broken against
