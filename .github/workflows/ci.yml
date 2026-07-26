@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Windows is in the matrix on purpose, not for completeness: the encoding and
+    # line-ending bugs this tool has actually had were Windows-only. A redirected
+    # stdout defaults to cp1252 there, which corrupts a non-Latin-1 title in a
+    # document whose whole point is that its typography is correct.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # The offline suite. The live tests (-m network) are deliberately not run
+      # here: GitHub runners have datacenter IPs, and YouTube blocks those
+      # ranges outright - often on the first request, as a matter of IP
+      # reputation rather than volume. A live job would fail on a green tree and
+      # train everyone to ignore red. See docs/adr/0010-ci-runs-offline-only.md.
+      - name: Tests
+        run: python -m pytest -q
+
+      # Catches what the tests can't: a packaging mistake that leaves the
+      # installed command broken while every import-based test still passes.
+      - name: Installed command works
+        run: transkrp --help

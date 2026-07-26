@@ -4,11 +4,18 @@ Fetches a YouTube transcript as a readable markdown file — prose with a
 `[timestamp]` anchor on every paragraph, so any line traces back to the video.
 
 ```
+pip install .
+transkrp "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+Or without installing — it's one file with one dependency:
+
+```
 pip install -r requirements.txt
 python transkrp.py "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-Writes `<title-slug>-<video_id>.md`.
+Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
 
 ```
 -o PATH          output file, or a directory (several videos, or a trailing /)
@@ -131,13 +138,23 @@ need a second fetch.
 ## Development
 
 ```
-python -m pytest tests/ -q
+pip install -e ".[dev]"
+python -m pytest -q          # 128 offline tests, no network
+python -m pytest -m network  # 12 live tests, really hits YouTube
 ```
 
-93 tests, no network — the caption fetch is stubbed at `_get`. They cover the
-things that go wrong quietly: scroll-duplicate removal, the paragraph break
-rules, punctuation detection, the retry policy, and the empty-body response that
-means a PO token is needed.
+The offline tests stub the caption fetch at `_get` and cover the things that go
+wrong quietly: the paragraph break rules, punctuation detection, the retry
+policy, batch resume, and the empty-body response that means a PO token is
+needed.
+
+The live ones are the ones that matter when something breaks — the offline suite
+will happily report 128 green while the tool is completely broken against
+YouTube, because everything it depends on is an undocumented endpoint that
+changes without notice. They're not in CI on purpose: GitHub runners have
+datacenter IPs and YouTube blocks those outright, so the job would fail on a
+healthy tree ([ADR 0010](docs/adr/0010-ci-runs-offline-only.md)). Run them
+locally when something looks wrong; they take five seconds.
 
 Design decisions that aren't obvious from the code are in
 [docs/adr/](docs/adr/README.md) — including why `json3` and not `vtt`, and why

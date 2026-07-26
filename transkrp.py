@@ -513,7 +513,9 @@ def _write(path: str, doc: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Fetch a YouTube transcript.")
+    # prog= because the installed console script puts its full path in argv[0],
+    # so --help would otherwise open with a line of C:\...\Scripts\transkrp.
+    ap = argparse.ArgumentParser(prog="transkrp", description="Fetch a YouTube transcript.")
     ap.add_argument("url", nargs="+", help="video URLs; a playlist or channel URL expands")
     ap.add_argument("-o", "--out", help="output file, or a directory for several videos; "
                                         "'-' for stdout (default: ./<title-slug>-<id>.<ext>)")
@@ -666,10 +668,21 @@ def _list(url: str, proxy: str | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> int:
+    """Entry point for the installed `transkrp` command.
+
+    Exists so the console script gets the Ctrl-C contract too. Pointing the
+    script at main() would mean a KeyboardInterrupt traceback for the installed
+    command and a clean message for `python transkrp.py` — same program,
+    different manners.
+    """
     try:
-        raise SystemExit(main())
+        return main()
     except KeyboardInterrupt:
         # Ctrl-C during a playlist run is a decision, not a crash.
         print("\ninterrupted", file=sys.stderr)
-        raise SystemExit(130)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
