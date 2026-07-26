@@ -771,6 +771,221 @@ def test_list_of_an_unavailable_video_fails(monkeypatch, capsys):
     assert "private video" in capsys.readouterr().err
 
 
+# --------------------------------------------------------------------------
+# resuming a batch run
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url,want", [
+    ("https://www.youtube.com/watch?v=jNQXAC9IVRw", "jNQXAC9IVRw"),
+    ("https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PL&index=2", "jNQXAC9IVRw"),
+    ("https://youtu.be/jNQXAC9IVRw", "jNQXAC9IVRw"),
+    ("https://www.youtube.com/shorts/jNQXAC9IVRw", "jNQXAC9IVRw"),
+    ("https://www.youtube.com/playlist?list=PLxyz", None),
+])
+def test_video_id_is_read_off_the_url(url, want):
+    """Without asking YouTube — that request is the one we're saving."""
+    assert tk.video_id(url) == want
+
+
+def test_existing_matches_on_the_id_not_the_title(tmp_path):
+    """The title slug isn't knowable without a probe; the id is."""
+    (tmp_path / "some-old-title-vid12345678.md").write_text("x")
+    assert tk._existing(str(tmp_path), "vid12345678", "md")
+    assert tk._existing(str(tmp_path), "vid12345678", "json") is None
+    assert tk._existing(str(tmp_path), "othervideo1", "md") is None
+
+
+def test_existing_without_an_id_declines_to_guess(tmp_path):
+    assert tk._existing(str(tmp_path), None, "md") is None
+
+
+def test_existing_partial_id_does_not_match(tmp_path):
+    """"-<id>.md" so a video whose id is a suffix of another doesn't collide."""
+    (tmp_path / "title-xxvid12345678.md").write_text("x")
+    assert tk._existing(str(tmp_path), "vid12345678", "md") is None
+
+
+def test_a_trailing_slash_means_a_directory(monkeypatch, tmp_path):
+    """`-o notes/` with one video used to write a *file* called "notes"."""
+    stub_video(monkeypatch, [ev(0, 1000, "Hello.")], title="Talk")
+    out = tmp_path / "notes"
+    assert tk.main(["http://x", "-o", f"{out}/"]) == 0
+    assert out.is_dir()
+    assert (out / "talk-vid12345678.md").exists()
+
+
+def test_an_explicit_filename_is_still_a_file(monkeypatch, tmp_path):
+    stub_video(monkeypatch, [ev(0, 1000, "Hello.")])
+    out = tmp_path / "mine.md"
+    tk.main(["http://x", "-o", str(out)])
+    assert out.is_file()
+
+
+def test_skip_existing_with_an_explicit_filename(monkeypatch, tmp_path):
+    """-o FILE: "already written" is just whether that file is there."""
+    out = tmp_path / "mine.md"
+    out.write_text("previously")
+    monkeypatch.setattr(tk, "transcript",
+                        lambda *a, **k: pytest.fail("should not have fetched"))
+    assert tk.main(["https://youtu.be/vid12345678", "-o", str(out),
+                    "--skip-existing"]) == 0
+    assert out.read_text() == "previously"
+
+
+def test_skip_existing_with_no_out_looks_in_the_working_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "whatever-vid12345678.md").write_text("x")
+    monkeypatch.setattr(tk, "transcript",
+                        lambda *a, **k: pytest.fail("should not have fetched"))
+    assert tk.main(["https://youtu.be/vid12345678", "--skip-existing"]) == 0
+
+
+def test_skip_existing_does_not_fetch(monkeypatch, tmp_path, capsys):
+    """The whole point: no request for what's already on disk."""
+    (tmp_path / "already-there-vid12345678.md").write_text("x")
+    calls = []
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: calls.append(url) or doc())
+    rc = tk.main(["https://youtu.be/vid12345678",
+                  "https://youtu.be/otherone123", "-o", str(tmp_path),
+                  "--skip-existing"])
+    assert rc == 0
+    assert calls == ["https://youtu.be/otherone123"]
+    assert "have already-there-vid12345678.md" in capsys.readouterr().err
+
+
+def test_without_skip_existing_it_refetches(monkeypatch, tmp_path):
+    (tmp_path / "already-there-vid12345678.md").write_text("x")
+    calls = []
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: calls.append(url) or doc())
+    monkeypatch.setattr(tk.time, "sleep", lambda s: None)
+    tk.main(["https://youtu.be/vid12345678", "https://youtu.be/otherone123",
+             "-o", str(tmp_path)])
+    assert len(calls) == 2
+
+
+def test_skips_are_not_paced(monkeypatch, tmp_path):
+    """A resume shouldn't crawl for a second per file it isn't fetching."""
+    for i in range(3):
+        (tmp_path / f"t-vid1234567{i}.md").write_text("x")
+    slept = []
+    monkeypatch.setattr(tk.time, "sleep", slept.append)
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: doc())
+    tk.main([f"https://youtu.be/vid1234567{i}" for i in range(3)]
+            + ["https://youtu.be/realone1234", "-o", str(tmp_path), "--skip-existing"])
+    assert slept == []  # three skips then one fetch: nothing to pace
+
+
+# --------------------------------------------------------------------------
+# giving up when rate-limited
+# --------------------------------------------------------------------------
+
+def test_rate_limited_is_a_lookup_error():
+    """Callers who don't care keep the one-exception contract of ADR 0007."""
+    assert issubclass(tk.RateLimited, LookupError)
+
+
+@pytest.mark.parametrize("msg", [
+    "HTTP Error 429: Too Many Requests",
+    "Sign in to confirm you're not a bot",
+    "YouTube is blocking requests from your IP",
+])
+def test_block_messages_are_recognised(msg):
+    assert tk._looks_rate_limited(msg)
+
+
+@pytest.mark.parametrize("msg", [
+    "Video unavailable", "Private video", "This video is age-restricted",
+])
+def test_ordinary_failures_are_not_mistaken_for_a_block(msg):
+    assert not tk._looks_rate_limited(msg)
+
+
+def test_a_block_stops_the_run(monkeypatch, tmp_path, capsys):
+    """Asking 197 more times makes the block worse and finds nothing."""
+    calls = []
+
+    def blocked(url, *a, **k):
+        calls.append(url)
+        if len(calls) == 2:
+            raise tk.RateLimited("YouTube rate-limited the caption fetch (429)")
+        return doc(title=url[-1])
+
+    monkeypatch.setattr(tk, "transcript", blocked)
+    monkeypatch.setattr(tk.time, "sleep", lambda s: None)
+    rc = tk.main([f"https://youtu.be/vid123456{i:02d}" for i in range(6)]
+                 + ["-o", str(tmp_path)])
+    assert rc == 1
+    assert len(calls) == 2  # stopped, did not try the other four
+    err = capsys.readouterr().err
+    assert "4 of 6 not fetched" in err
+    assert "--skip-existing" in err
+
+
+def test_an_ordinary_failure_does_not_stop_the_run(monkeypatch, tmp_path):
+    """Only a block is grounds for giving up; a private video isn't."""
+    calls = []
+
+    def flaky(url, *a, **k):
+        calls.append(url)
+        if len(calls) == 2:
+            raise LookupError("Private video")
+        return doc(title=url[-1])
+
+    monkeypatch.setattr(tk, "transcript", flaky)
+    monkeypatch.setattr(tk.time, "sleep", lambda s: None)
+    assert tk.main([f"https://youtu.be/vid123456{i:02d}" for i in range(4)]
+                   + ["-o", str(tmp_path)]) == 1
+    assert len(calls) == 4
+
+
+def test_batch_run_reports_a_tally(monkeypatch, tmp_path, capsys):
+    (tmp_path / "had-vid12345600.md").write_text("x")
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: doc(title=url[-1]))
+    monkeypatch.setattr(tk.time, "sleep", lambda s: None)
+    tk.main([f"https://youtu.be/vid123456{i:02d}" for i in range(3)]
+            + ["-o", str(tmp_path), "--skip-existing"])
+    assert "2 written, 1 already had of 3" in capsys.readouterr().err
+
+
+def test_a_single_video_gets_no_tally(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: doc())
+    tk.main(["https://youtu.be/vid12345678", "-o", str(tmp_path / "one.md")])
+    assert " of 1" not in capsys.readouterr().err
+
+
+def test_extract_maps_a_block_to_rate_limited(monkeypatch):
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download=False):
+            raise tk.yt_dlp.utils.DownloadError("ERROR: Sign in to confirm you're not a bot")
+
+    monkeypatch.setattr(tk.yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(tk.RateLimited):
+        tk._extract("http://x")
+
+
+def test_extract_leaves_an_ordinary_error_alone(monkeypatch):
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download=False):
+            raise tk.yt_dlp.utils.DownloadError("ERROR: Video unavailable")
+
+    monkeypatch.setattr(tk.yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(LookupError) as caught:
+        tk._extract("http://x")
+    assert not isinstance(caught.value, tk.RateLimited)
+
+
+def test_persistent_429_raises_rate_limited(monkeypatch, no_sleep):
+    monkeypatch.setattr(tk, "_opener", lambda proxy=None: FakeOpener(*[http(429)] * 4))
+    with pytest.raises(tk.RateLimited):
+        tk._get("http://j")
+
+
 def test_cli_passes_the_word_target_through(monkeypatch, tmp_path):
     got = {}
 

@@ -22,6 +22,12 @@ once accepted — superseded by a later record instead.
 | [0006](0006-paragraph-segmentation.md) | Break on turn, then silence, then length | Accepted |
 | [0007](0007-failure-handling.md) | Every failure is a LookupError with a next step | Accepted |
 | [0008](0008-playlists-and-multiple-urls.md) | Playlists expand; several videos need a directory | Accepted |
+| [0009](0009-batch-runs-resume.md) | Batch runs resume instead of restarting | Accepted |
+
+The survey these draw on is
+[docs/research/2026-07-youtube-transcript-extraction.md](../research/2026-07-youtube-transcript-extraction.md)
+— how extraction actually works, what was measured, and which published advice
+turned out to be wrong.
 
 ## Writing a new one
 

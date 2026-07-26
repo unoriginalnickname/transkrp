@@ -11,24 +11,33 @@ python transkrp.py "https://www.youtube.com/watch?v=VIDEO_ID"
 Writes `<title-slug>-<video_id>.md`.
 
 ```
--o PATH        output file, or a directory when there are several videos
--o -           stdout
---json         JSON instead of markdown
---list         show the caption tracks and exit
---lang KEY     force a track (e.g. en-orig)
---words N      target paragraph length (default 110)
---proxy URL    route both requests through a proxy
+-o PATH          output file, or a directory (several videos, or a trailing /)
+-o -             stdout
+--json           JSON instead of markdown
+--list           show the caption tracks and exit
+--lang KEY       force a track (e.g. en-orig)
+--words N        target paragraph length (default 110)
+--proxy URL      route both requests through a proxy
+--skip-existing  don't refetch what's already in the output directory
 ```
 
 Several videos at once, and playlists and channels expand:
 
 ```
-python transkrp.py "https://www.youtube.com/playlist?list=..." -o ./notes/
+python transkrp.py "https://www.youtube.com/playlist?list=..." -o ./notes/ --skip-existing
 ```
 
 A video shared from inside a playlist (`watch?v=X&list=Y`) is treated as that one
 video, not the playlist around it. One failure doesn't stop the run — the error
 goes to stderr and the rest continue.
+
+### Playlists bigger than the rate limit
+
+YouTube allows a few hundred caption pulls an hour per IP, so a long playlist
+will get blocked partway. When that happens the run **stops** rather than
+hammering a limiter that just said no, and tells you what's left. Rerun the same
+command later: `--skip-existing` matches on the video id already in each
+filename, so it resumes without spending a request on anything it has.
 
 As a library:
 
@@ -132,4 +141,7 @@ means a PO token is needed.
 
 Design decisions that aren't obvious from the code are in
 [docs/adr/](docs/adr/README.md) — including why `json3` and not `vtt`, and why
-speakers aren't named.
+speakers aren't named. The survey behind them is in
+[docs/research/](docs/research/2026-07-youtube-transcript-extraction.md): how
+extraction actually works, what was measured against the live API, and which
+widely-repeated advice turned out to be wrong.

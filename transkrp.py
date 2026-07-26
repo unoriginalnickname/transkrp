@@ -37,6 +37,15 @@ TIMEOUT = 30  # seconds; without one, urlopen waits on a stalled socket forever
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 
+class RateLimited(LookupError):
+    """YouTube is refusing us for volume, not for anything about this video.
+
+    A LookupError subclass so the "catch one exception type" contract in ADR 0007
+    still holds for callers who don't care. Batch runs do care: every remaining
+    video will fail the same way, and trying them makes the block worse.
+    """
+
+
 class _Silent:  # yt-dlp logs errors itself; we raise them instead
     def debug(self, m): pass
     def info(self, m): pass
@@ -55,7 +64,19 @@ def _extract(url: str, **extra) -> dict:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:  # unavailable, private, bad URL
-        raise LookupError(str(e).replace("ERROR: ", "").strip()) from e
+        msg = str(e).replace("ERROR: ", "").strip()
+        raise (RateLimited if _looks_rate_limited(msg) else LookupError)(msg) from e
+
+
+# yt-dlp reports a block as free text, so this is pattern-matching on prose. It
+# only decides whether a batch run gives up early, so a miss costs a few wasted
+# requests rather than a wrong result.
+_BLOCKED = re.compile(r"429|too many requests|rate.?limit|sign in to confirm|"
+                      r"not a bot|block\w*[^.]*\bip\b|\bip\b[^.]*block", re.I)
+
+
+def _looks_rate_limited(msg: str) -> bool:
+    return bool(_BLOCKED.search(msg))
 
 
 def probe(url: str, proxy: str | None = None) -> dict:
@@ -81,6 +102,17 @@ _LIST_URL = re.compile(r"/playlist|/channel/|/@|/c/|/user/|[?&]list=", re.I)
 def is_playlist_url(url: str) -> bool:
     """Does this URL name several videos rather than one?"""
     return not _VIDEO_URL.search(url) and bool(_LIST_URL.search(url))
+
+
+def video_id(url: str) -> str | None:
+    """The 11-character id, read off the URL without asking YouTube.
+
+    This is what makes --skip-existing worth having: the id is in every output
+    filename, so a rerun can tell what it already has *before* spending the
+    request that would be rate-limited.
+    """
+    m = _VIDEO_URL.search(url)
+    return m.group(0)[-11:] if m else None
 
 
 def expand(url: str, proxy: str | None = None) -> list[str]:
@@ -203,7 +235,7 @@ def _get(url: str, tries: int = 4, proxy: str | None = None) -> bytes:
                 time.sleep(_backoff(attempt))
                 continue
             if e.code == 429:
-                raise LookupError("YouTube rate-limited the caption fetch (429) - "
+                raise RateLimited("YouTube rate-limited the caption fetch (429) - "
                                   "wait a few minutes, or use --proxy from a "
                                   "datacenter IP") from e
             if e.code == 403:
@@ -443,6 +475,38 @@ def render(t: dict, as_json: bool) -> str:
     return json.dumps(t, indent=2, ensure_ascii=False) if as_json else to_markdown(t)
 
 
+def _already_written(url: str, out_dir: str | None, explicit: str | None,
+                     ext: str) -> str | None:
+    """Where this video's output already is, if it is anywhere.
+
+    Three shapes to cover: `-o DIR` (look for the id in it), `-o FILE` (does that
+    file exist), and no `-o` at all (look for the id in the working directory,
+    which is where the default name lands).
+    """
+    if out_dir:
+        return _existing(out_dir, video_id(url), ext)
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    return _existing(".", video_id(url), ext)
+
+
+def _existing(out_dir: str, vid: str | None, ext: str) -> str | None:
+    """The already-written file for this video, if there is one.
+
+    Matched on the id rather than the whole filename because the rest of the
+    name is the title slug, and knowing the title means probing — which is the
+    request we are trying not to spend.
+    """
+    if not vid:
+        return None  # couldn't read an id off the URL; fetching is the safe answer
+    try:
+        entries = os.listdir(out_dir)
+    except OSError:
+        return None
+    hit = next((n for n in entries if n.endswith(f"-{vid}.{ext}")), None)
+    return os.path.join(out_dir, hit) if hit else None
+
+
 def _write(path: str, doc: str) -> None:
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(doc if doc.endswith("\n") else doc + "\n")
@@ -460,6 +524,9 @@ def main(argv: list[str] | None = None) -> int:
                                                    "YouTube blocks datacenter IPs")
     ap.add_argument("--words", type=int, default=TARGET_WORDS, metavar="N",
                     help=f"target paragraph length (default {TARGET_WORDS})")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="don't refetch videos already written to the output "
+                         "directory; use this to resume an interrupted run")
     args = ap.parse_args(argv)
 
     # A redirected stdout defaults to the locale encoding, which on Windows is
@@ -485,7 +552,12 @@ def main(argv: list[str] | None = None) -> int:
     # One video keeps the old contract: -o is the file. Several need somewhere to
     # put them, so -o becomes the directory — silently overwriting one file with
     # the next twelve would be worse than refusing.
-    into_dir = not to_stdout and (len(urls) > 1 or (args.out and os.path.isdir(args.out)))
+    #
+    # A trailing slash also means a directory, whatever the arity. Without that,
+    # `-o notes/` with a single video wrote a *file* called "notes", and the run
+    # that added a second video then couldn't create the directory.
+    wants_dir = bool(args.out) and (args.out.endswith(("/", "\\")) or os.path.isdir(args.out))
+    into_dir = not to_stdout and (len(urls) > 1 or wants_dir)
     out_dir = (args.out or ".") if into_dir else None
 
     if out_dir:
@@ -496,18 +568,39 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 1
 
-    docs, failed = [], 0
-    for i, url in enumerate(urls):
-        if i:
+    docs, failed, skipped, done, fetched = [], 0, 0, 0, False
+    for url in urls:
+        if args.skip_existing and not to_stdout:
+            have = _already_written(url, out_dir, args.out, ext)
+            if have:
+                print(f"have {os.path.basename(have)}", file=sys.stderr)
+                skipped += 1
+                continue
+
+        if fetched:
             # Caption pulls are rate-limited per IP at a few hundred an hour. A
-            # playlist is exactly the shape of traffic that trips it.
+            # playlist is exactly the shape of traffic that trips it. Pace the
+            # fetches, not the skips — a resume shouldn't crawl past work it
+            # isn't doing.
             time.sleep(1)
+        fetched = True
         try:
             t = transcript(url, args.lang, args.proxy, args.words)
+        except RateLimited as e:
+            # Every remaining video will fail the same way, and asking makes the
+            # block worse. Stop and say how to pick up where this left off.
+            print(f"error: {url}: {e}", file=sys.stderr)
+            failed += 1
+            if len(urls) > 1:
+                print(f"stopping with {len(urls) - done - skipped - failed} of "
+                      f"{len(urls)} not fetched. Resume later with --skip-existing.",
+                      file=sys.stderr)
+            break
         except LookupError as e:
             print(f"error: {url}: {e}", file=sys.stderr)
             failed += 1
             continue
+        done += 1
 
         if to_stdout:
             # Keep JSON as objects: several documents concatenated are not JSON,
@@ -530,6 +623,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if to_stdout and docs:
         print(_stdout_doc(docs, args.json))
+    if len(urls) > 1:
+        parts = [f"{done} written"]
+        if skipped:
+            parts.append(f"{skipped} already had")
+        if failed:
+            parts.append(f"{failed} failed")
+        print(f"{', '.join(parts)} of {len(urls)}", file=sys.stderr)
     return 1 if failed else 0
 
 
