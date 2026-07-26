@@ -18,13 +18,19 @@ background research in
   attribution, but a hostile repackaging of someone's library is a bad way to
   exist.
 
-- [ ] **An explicit `--translate LANG`.** YouTube will machine-translate its ASR
-  into ~150 languages and we deliberately avoid those (see track selection), but
-  there's no way to *ask* for one. `youtube-transcript-api` exposes this as
-  `.translate()`. Worth having as an explicit opt-in, flagged in the frontmatter
-  the way it already is when one is chosen by hand.
+- [ ] **More granular exceptions for library users.** Everything actionable is a
+  `LookupError`, with `RateLimited` the one subclass. A caller wanting to tell
+  "video is private" from "no captions exist" has to match on message text.
+  [ADR 0007](docs/adr/0007-failure-handling.md) anticipated revisiting this.
 
 ## Checked and closed without a change
+
+- **An explicit `--translate LANG`** was on this list, borrowed from
+  `youtube-transcript-api`'s `.translate()`. `--lang` already does it: YouTube
+  lists all ~150 machine translations as ordinary auto tracks, so `--lang de`
+  fetches the German one and flags it `translated: true`. A separate flag would
+  be a worse alias — `--lang de` also prefers a *human* German track if one
+  exists, which `--translate de` by definition could not.
 
 - **Split speaker turns sharing a timestamp** was on this list as a minor
   accuracy bug. Measured on a 5,180-cue congressional hearing: 474 cues carry

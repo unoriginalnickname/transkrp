@@ -68,6 +68,23 @@ def test_scroll_duplicates_are_dropped(monkeypatch):
     assert [s[2] for s in segs] == ["hello there", "hello there general kenobi"]
 
 
+def test_an_append_event_carrying_words_is_still_dropped(monkeypatch):
+    """Proves the aAppend guard does something, since real data never asks it to.
+
+    Measured across three videos: every aAppend event holds exactly "\\n", so the
+    `if text` check downstream would drop them anyway and disabling this filter
+    changes no output at all (ADR 0002's correction). That makes the guard
+    untested by accident — real feeds cannot exercise it. This constructs the
+    case it exists for: an append that does carry text, which is a continuation
+    of what is already on screen and would duplicate silently.
+    """
+    info = track("automatic_captions", "en", payload(
+        ev(0, 1000, "the quick brown fox"),
+        ev(1000, 1000, "the quick brown fox jumps", append=True),
+    ), monkeypatch)
+    assert [s[2] for s in tk.segments(info, "auto", "en")] == ["the quick brown fox"]
+
+
 def test_events_without_segs_are_skipped(monkeypatch):
     info = track("subtitles", "en", payload(
         {"tStartMs": 0},                      # window definition, no text

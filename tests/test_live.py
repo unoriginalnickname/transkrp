@@ -30,6 +30,7 @@ pytestmark = pytest.mark.network
 # Two videos chosen to still exist in five years.
 ZOO = "https://www.youtube.com/watch?v=jNQXAC9IVRw"       # the first YouTube video
 LECTURE = "https://www.youtube.com/watch?v=Unzc731iCUY"   # MIT OCW, "How to Speak"
+HEARING = "https://www.youtube.com/watch?v=QVdD66_ej8g"   # multi-speaker, 474 '>>'
 # The lecture is the useful one: ~1h, a manual track under a multi-track key
 # (en-<trackid>, not "en"), and separate auto tracks — so it exercises track
 # selection and gives auto-captions long enough for scroll-duplication to show.
@@ -82,6 +83,21 @@ def lecture_auto():
 def lecture_info():
     try:
         return tk.probe(LECTURE)
+    except LookupError as e:
+        _skip_if_environmental(e)
+        raise
+
+
+@pytest.fixture(scope="session")
+def hearing_info():
+    """A multi-speaker video, for the one thing a lecture can't show.
+
+    The lecture is one man talking for an hour, so it carries no '>>' at all.
+    Only a genuine multi-speaker recording says anything about the marker
+    convention.
+    """
+    try:
+        return tk.probe(HEARING)
     except LookupError as e:
         _skip_if_environmental(e)
         raise
@@ -182,6 +198,103 @@ def test_typography_is_normalised(lecture):
 # --------------------------------------------------------------------------
 # discovery and failure
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# canaries for the measurements this design rests on
+#
+# Each of these was established by measuring once, during the research, and then
+# written into an ADR or a comment as though it were permanent. It isn't — every
+# one is a fact about YouTube that YouTube can change. These fail if it does.
+# --------------------------------------------------------------------------
+
+def test_speaker_markers_are_still_cue_leading(hearing_info):
+    """`>>` at the start of a cue, never mid-cue — 474 of 474 when measured.
+
+    _split_turns has a branch for a mid-cue marker that consequently never fires
+    (documented in its docstring). If YouTube changes the convention, that branch
+    starts carrying real traffic and this is how we find out.
+
+    Needs a multi-speaker video: the lecture is one person for an hour and has no
+    markers at all.
+    """
+    segs = tk.segments(hearing_info, "auto", "en")
+    marked = [t for _, _, t in segs if ">>" in t]
+    if len(marked) < 5:
+        pytest.skip("this video has too few speaker markers to say anything")
+    leading = [t for t in marked if t.lstrip().startswith(">>")]
+    assert len(leading) == len(marked), f"{len(marked) - len(leading)} mid-cue markers"
+
+
+def test_caption_urls_are_still_signed_and_ip_bound(lecture_info):
+    """ADR 0003 rests on this: the URL carries ip/expire/signature.
+
+    It is why the fetch has to happen on the machine that did the extraction, why
+    a 403 is reported as "expired or issued for a different IP", and why the
+    transcript dict must not be treated as re-fetchable later.
+    """
+    import urllib.parse
+    fmts = lecture_info["automatic_captions"]["en"]
+    url = next(f["url"] for f in fmts if f["ext"] == "json3")
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    assert {"ip", "expire", "signature", "sparams"} <= set(q)
+
+
+def test_youtube_still_offers_a_wall_of_machine_translations(lecture_info):
+    """Track selection avoids these deliberately; ~150 of them exist.
+
+    A German video offering an "en" auto track is why the ordering prefers the
+    original ASR over a translation. If the wall ever disappears, that ordering
+    is solving a problem that no longer exists.
+    """
+    auto = lecture_info.get("automatic_captions") or {}
+    assert len(auto) > 50, f"only {len(auto)} auto tracks - has this changed?"
+    assert "de" in auto and "ja" in auto  # translations of an English lecture
+
+
+def test_json3_is_still_dramatically_shorter_than_the_vtt(lecture_auto, lecture_info):
+    """The measurement the whole json3 choice rests on: 2.9x, freshly checked.
+
+    ADR 0002 says .vtt re-serialises the scrolling box and json3 doesn't. This
+    downloads both and compares. If the gap closes, the format choice is no
+    longer load-bearing and the ADR needs revisiting.
+    """
+    import re
+    fmts = lecture_info["automatic_captions"]["en-orig"]
+    vtt_url = next((f["url"] for f in fmts if f["ext"] == "vtt"), None)
+    if not vtt_url:
+        pytest.skip("no vtt track offered to compare against")
+    try:
+        raw = tk._get(vtt_url).decode("utf-8", "replace")
+    except LookupError as e:
+        _skip_if_environmental(e)
+        raise
+    # Strip it the naive way, which is the thing being compared against.
+    naive = re.sub(r"<[^>]+>|^(WEBVTT|Kind:|Language:|\d\d:\d\d:.*)$", "",
+                   raw, flags=re.M).split()
+    ours = lecture_auto["text"].split()
+    assert len(naive) > len(ours) * 2, (
+        f"vtt {len(naive)} vs json3 {len(ours)} - the duplication gap has closed")
+
+
+def test_a_foreign_video_prefers_its_own_language(lecture_info):
+    """The bug a synthetic fixture missed: an "en" auto track exists for every
+    video, so preferring English gave a machine translation of a machine
+    transcription while the original sat one line below.
+
+    Simulated on real track data rather than a hand-made dict: pretend this
+    lecture is German and has no human transcript, so the only choice left is
+    between the original-language ASR and the English translation of it.
+
+    (A *manual* English track would rightly still win — a human translation beats
+    a machine one — which is why the manual tracks are dropped here.)
+    """
+    pretend = dict(lecture_info, language="de", subtitles={})
+    if "de" not in (pretend.get("automatic_captions") or {}):
+        pytest.skip("no German track on this video to prefer")
+    source, key, translated = tk.pick_track(pretend)
+    assert key.startswith("de"), f"picked {key!r} over the spoken language"
+    assert translated is False
+
 
 def test_a_playlist_still_expands():
     try:
