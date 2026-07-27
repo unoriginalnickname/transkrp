@@ -298,22 +298,54 @@ def test_unattributed_transcripts_keep_the_old_turn_markers():
 # the description, which is free and was being discarded
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("desc,want", [
-    ("Our incredible guest today is Nick Cook. In the 1990s...",
-     "Our incredible guest today is Nick Cook."),
-    ("Daniel Peter Sheehan is a lawyer\nSecond line", "Daniel Peter Sheehan is a lawyer"),
-    ("", ""),
-    ("   ", ""),
+def test_the_opening_paragraph_is_taken_whole():
+    """A paragraph, not a sentence — see the hook case below for why."""
+    got = tk._first_sentence("Our incredible guest today is Nick Cook. "
+                             "In the 1990s he edited Jane's Defence Weekly.\n\nLinks:")
+    assert got.startswith("Our incredible guest today is Nick Cook.")
+    assert "Jane's" in got
+
+
+def test_a_description_that_opens_mid_hook_keeps_its_context():
+    """The correction this function exists for. A talk on ontologies opens "A
+    second refund on the same order." — one sentence of the failure story it is
+    motivating. Alone that reads as a non-sequitur; in context it reads as an
+    opening, and the paragraph goes on to name the speaker and his argument.
+    """
+    got = tk._first_sentence(
+        "A second refund on the same order. A payout sent to the support desk. "
+        "These are the mistakes a probabilistic agent makes. Frank Coyle argues "
+        "most agent failures are ontological.\n\nSpeaker info:\n- https://x.com/x")
+    assert "Frank Coyle argues" in got
+    assert "x.com" not in got
+
+
+@pytest.mark.parametrize("desc", [
+    "https://example.com/a\nhttps://example.com/b",       # a link dump
+    "- one\n- two\n- three",                              # a bullet list
+    "00:00 Intro\n01:23 The middle\n04:56 The end",        # chapter timestamps
+    "#ai #agents #ontology",                               # a hashtag tail
+    "Speaker info:",                                       # a bare header
+    "", "   ",
 ])
-def test_first_sentence(desc, want):
-    assert tk._first_sentence(desc) == want
+def test_furniture_is_not_mistaken_for_a_description(desc):
+    """None of these say what the video is, so none of them belong in `about:`."""
+    assert tk._first_sentence(desc) == ""
 
 
-def test_a_long_first_sentence_is_truncated():
-    got = tk._first_sentence("word " * 200)
-    assert len(got) < 240 and got.endswith("...")
+def test_furniture_is_skipped_to_reach_the_prose():
+    got = tk._first_sentence("Subscribe here:\n- https://example.com\n\n"
+                             "Nick Cook was the aviation editor of a defence journal "
+                             "and later an aerospace consultant.")
+    assert got.startswith("Nick Cook was the aviation editor")
+
+
+def test_a_long_opening_is_truncated():
+    got = tk._first_sentence("word " * 300)
+    assert len(got) <= 303 and got.endswith("...")
 
 
 def test_description_reaches_the_frontmatter():
-    body = tk.to_markdown(doc(description="Our guest today is Nick Cook. More text."))
-    assert "about: Our guest today is Nick Cook." in body
+    body = tk.to_markdown(doc(
+        description="Our guest today is Nick Cook, once an aviation editor."))
+    assert "about: Our guest today is Nick Cook, once an aviation editor." in body

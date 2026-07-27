@@ -632,16 +632,29 @@ def _date(yyyymmdd: str | None) -> str:
     return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
 
 
-def _first_sentence(text: str, limit: int = 220) -> str:
-    """The opening sentence of a description, flattened to one line.
+# Description lines that are furniture rather than prose: link dumps, chapter
+# lists, socials, hashtag tails, "Speaker info:" headers.
+_NOT_PROSE = re.compile(r"^\s*(?:[-*•]|\d{1,2}:\d{2}|#\w|https?://|\W*$)"
+                        r"|^\s*[\w ]{0,24}:\s*$", re.I)
 
-    Descriptions run to thousands of characters of links and sponsor copy, but
-    the first sentence is reliably who this is: "Our incredible guest today is
-    Nick Cook." That belongs in the frontmatter; the rest belongs in the JSON.
+
+def _first_sentence(text: str, limit: int = 300) -> str:
+    """The opening of a description — its first real paragraph, on one line.
+
+    This takes a paragraph rather than a sentence, which is a correction. Taking
+    one sentence assumed descriptions open by introducing the video, and plenty
+    open mid-hook instead: a talk on ontologies begins "A second refund on the
+    same order." — a fragment of the failure story it's motivating. Alone, that
+    reads as a non-sequitur; with the rest of its paragraph it reads as what it
+    is, an opening. Lines that are links, chapter lists or socials are skipped,
+    because none of them say what the video is.
     """
-    first = re.split(r"(?<=[.!?])\s|\n", text.strip(), maxsplit=1)[0]
-    first = re.sub(r"\s+", " ", first).strip()
-    return first[:limit].rstrip() + "..." if len(first) > limit else first
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = [l for l in block.splitlines() if not _NOT_PROSE.match(l)]
+        prose = re.sub(r"\s+", " ", " ".join(lines)).strip()
+        if len(prose) > 40:  # shorter than this is a label, not a description
+            return prose[:limit].rstrip() + "..." if len(prose) > limit else prose
+    return ""
 
 
 def _chapters(info: dict) -> list[dict]:
