@@ -963,7 +963,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Set once if the claude CLI turns out to be missing, so a 40-video run
     # says so once instead of forty times.
-    speaker_state = {"off": False, "people": _load_people(out_dir)}
+    speaker_state = {"off": False, "people": _load_people(out_dir),
+                     "out_dir": out_dir}
     docs, failed, skipped, done, fetched = [], 0, 0, 0, False
     for url in urls:
         if args.skip_existing and not args.force and not to_stdout:
@@ -1103,6 +1104,12 @@ def _attribute(t: dict, args, state: dict) -> None:
     before = len(state["people"])
     state["people"].update(ontology.confirmed(t, result, state["people"]))
     learned = len(state["people"]) - before
+    # Written now rather than at the end of the run. A 41-video playlist gets
+    # interrupted - a rate limit, a Ctrl-C, a killed shell - and saving only on
+    # a clean exit threw away every identity the run had learned. The first
+    # attempt at this playlist died at video seven and lost all six.
+    if learned:
+        _save_people(state["out_dir"], state["people"])
 
     unattributed = result["unattributed"]
     print(f"  speakers: {', '.join(result['speakers']) or 'none identified'}"

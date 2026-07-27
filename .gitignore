@@ -12,3 +12,6 @@ dist/
 /*.json
 !/README.md
 !/TODO.md
+
+# Fetched corpora - transcripts, not source
+/corpus/

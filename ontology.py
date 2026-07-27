@@ -53,6 +53,29 @@ _NOT_A_NAME = {
 }
 
 
+def tidy_name(name: str) -> str:
+    """Strip what a sentence leaves stuck to a name.
+
+    Extraction pulls names out of running speech, so they arrive wearing the
+    grammar around them: "Magnus Carlsen's" came back as a person from a real
+    transcript. A possessive is not part of anyone's name, and left alone it
+    becomes a second node for someone the graph already has.
+    """
+    name = re.sub(r"[’']s\b", "", name.strip())
+    return re.sub(r"\s+", " ", name.strip(" ,.;:!?\"'()[]")).strip()
+
+
+def is_full_name(name: str) -> bool:
+    """Two words or more — enough to identify someone across a corpus.
+
+    A bare given name is real information inside its own recording and a hazard
+    outside it: forty videos will contain several unrelated Maxes, and merging
+    them on the string would invent a person who connects things no one person
+    connects. Callers keep single-name people but must not merge them globally.
+    """
+    return len(_fold(tidy_name(name)).split()) >= 2
+
+
 def _fold(text: str) -> str:
     """A comparison key: case, accents, punctuation and spacing removed.
 
