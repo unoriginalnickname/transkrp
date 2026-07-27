@@ -154,6 +154,36 @@ def test_a_credited_title_does_contribute():
     assert "Nick Cook" in ont.known_people(t).values()
 
 
+@pytest.mark.parametrize("name,first,last", [
+    ("Daniel Peter Sheehan", "daniel", "sheehan"),   # middle name
+    ("Dr. Jane Smith Jr.", "jane", "smith"),         # title and suffix
+    ("Tom O'Neill, PhD", "tom", "oneill"),           # trailing credential
+    ("Ludwig van der Berg", "ludwig", "van der berg"),  # particle
+    ("Martin Luther King Jr", "martin", "king"),
+])
+def test_names_are_parsed_not_split(name, first, last):
+    """Splitting on whitespace and taking the ends gave first="dr", last="jr"
+    for "Dr. Jane Smith Jr." — wrong for any name with a title, suffix or
+    particle, which is common in exactly this material."""
+    assert ont._parts(name) == (first, last)
+
+
+@pytest.mark.parametrize("claimed", [
+    "Daniel Sheehan",      # middle name dropped
+    "Dr. Daniel Sheehan",  # title added
+])
+def test_the_same_person_under_a_different_form_resolves(claimed):
+    known = {ont._fold("Daniel Peter Sheehan"): "Daniel Peter Sheehan"}
+    assert ont.canonicalise(claimed, known) == ("Daniel Peter Sheehan", True)
+
+
+def test_parsing_does_not_reopen_the_fusing_hole():
+    """A given name that disagrees still blocks the match, however the rest of
+    the name is decorated."""
+    known = {ont._fold("Tom O'Neill"): "Tom O'Neill"}
+    assert ont.canonicalise("Tim O'Neill, PhD", known)[1] is False
+
+
 def test_a_surname_alone_resolves_when_unambiguous():
     known = {"tom oneill": "Tom O'Neill"}
     assert ont.canonicalise("O'Neill", known) == ("Tom O'Neill", True)

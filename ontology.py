@@ -26,10 +26,12 @@ the point: the check on the probabilistic step must not itself be probabilistic.
 
 from __future__ import annotations
 
-import difflib
 import re
 import unicodedata
 from collections import Counter
+
+from nameparser import HumanName
+from rapidfuzz import fuzz
 
 # Two people is the shape of an interview. More is normal when clips and
 # archival audio are played, so this flags rather than rejects — the count that
@@ -77,16 +79,17 @@ def _close(a: str, b: str) -> bool:
     "O'Neill"), and exact folding misses all of it, leaving a corpus with two
     nodes for one person.
 
-    Compared **word by word**, which a whole-string ratio is too blunt for: on
-    "tim oneill" against "tom oneill" a global comparison scores 0.89 and merges
-    Tim into Tom. Per word, the surnames match exactly and the difference lands
-    on a three-letter given name — too short for a slip to be the likelier
-    explanation, so it is refused.
+    Compared **word by word**, which no single similarity score can replace:
+    rapidfuzz rates "tim oneill" against "tom oneill" at 90, comfortably inside
+    any threshold that also accepts the real slips — so a whole-string ratio
+    fuses Tim and Tom whatever you set it to. Per word, the surnames match
+    exactly and the difference lands on a three-letter given name, too short for
+    a slip to be the likelier explanation. The library supplies the comparison;
+    the per-word structure is what makes it safe.
 
-    Deliberately tight, and only consulted against names the metadata vouches
-    for. Loosening it trades a missed merge for a wrong one, and merging two
-    real people is much the worse error: a split person is visible in the data,
-    a fused one is not.
+    Loosening this trades a missed merge for a wrong one, and merging two real
+    people is much the worse error: a split person is visible in the data, a
+    fused one is not.
     """
     left, right = a.split(), b.split()
     if not left or len(left) != len(right):
@@ -96,14 +99,26 @@ def _close(a: str, b: str) -> bool:
             continue
         if min(len(x), len(y)) < _SLIP_SAFE_LENGTH:
             return False
-        if difflib.SequenceMatcher(None, x, y).ratio() < 0.85:
+        if fuzz.ratio(x, y) < 85:
             return False
     return True
 
 
+def _parts(name: str) -> tuple[str, str]:
+    """(given name, family name), folded — via nameparser, not by splitting.
+
+    Splitting on whitespace and taking the ends is wrong for any name carrying a
+    title, a suffix or a particle, and those are common in exactly the material
+    this reads: "Dr. Jane Smith Jr." gave first="dr", last="jr", and
+    "Tom O'Neill, PhD" gave last="phd". nameparser knows about all of it,
+    including "van der Berg" as one surname.
+    """
+    parsed = HumanName(name)
+    return _fold(parsed.first), _fold(parsed.last)
+
+
 def _surname(name: str) -> str:
-    parts = _fold(name).split()
-    return parts[-1] if parts else ""
+    return _parts(name)[1] or (_fold(name).split() or [""])[-1]
 
 
 def names_in(text: str) -> list[str]:
@@ -133,20 +148,31 @@ def names_in(text: str) -> list[str]:
     return out
 
 
-def known_people(t: dict) -> dict[str, str]:
-    """Everyone the video's own metadata names → their canonical spelling.
+def known_people(t: dict, corpus: dict[str, str] | None = None) -> dict[str, str]:
+    """Everyone this video names, plus everyone the corpus already knows.
 
     The channel is the host. The title and description carry the guest, spelled
-    by a human rather than by speech recognition — which is the whole reason
-    this is worth doing. Keyed by fold, so a mangled variant finds its way home.
+    by a human rather than by speech recognition. Keyed by fold, so a mangled
+    variant finds its way home.
+
+    `corpus` is what makes cross-referencing work rather than merely look like
+    it. A person introduced properly in episode 3 is often only *mentioned* in
+    episode 12 — no description entry, just ASR-mangled speech — so per-video
+    knowledge alone leaves them ungrounded there, flagged, and unjoinable to
+    their own earlier appearance. Carrying confirmed people forward resolves
+    them everywhere they speak.
+
+    The video's own metadata still wins on a collision: it is the more
+    authoritative source for the video it describes.
     """
-    people: dict[str, str] = {}
+    people: dict[str, str] = dict(corpus or {})
+    own: dict[str, str] = {}
 
     def add(name: str) -> None:
         key = _fold(name)
         # Longest spelling wins: "Daniel Peter Sheehan" over a later "Sheehan".
-        if key and (key not in people or len(name) > len(people[key])):
-            people[key] = name
+        if key and (key not in own or len(name) > len(own[key])):
+            own[key] = name
 
     if channel := (t.get("channel") or "").strip():
         add(channel)
@@ -154,7 +180,29 @@ def known_people(t: dict) -> dict[str, str]:
         add(name)
     for name in names_in(t.get("description") or ""):
         add(name)
+
+    people.update(own)
     return people
+
+
+def confirmed(t: dict, result: dict, corpus: dict[str, str] | None = None) -> dict[str, str]:
+    """The people this video actually established, for the corpus to remember.
+
+    Only speakers that were *grounded* — vouched for by the video's own metadata
+    — are carried forward. An ungrounded name is exactly the kind of thing that
+    should not spread: propagating a hallucinated or misheard speaker across a
+    corpus would make it self-confirming, and the flag on it would disappear at
+    the moment it started doing damage.
+    """
+    known = known_people(t, corpus)
+    out: dict[str, str] = {}
+    for label in result.get("labels") or []:
+        if not (label and label.get("speaker")):
+            continue
+        name, grounded = canonicalise(label["speaker"], known)
+        if grounded:
+            out[_fold(name)] = name
+    return out
 
 
 # Where a title actually credits a person: "... — Frank Coyle, UC Berkeley",
@@ -191,15 +239,14 @@ def canonicalise(name: str, known: dict[str, str]) -> tuple[str, bool]:
     if len(near) == 1:
         return near[0], True
 
-    # A dropped middle name: "Daniel Sheehan" is the person the description
-    # calls "Daniel Peter Sheehan". Requires both the given name and the surname
-    # to agree, so it cannot merge two siblings.
-    if len(key.split()) >= 2:
-        first, last = key.split()[0], key.split()[-1]
-        matches = [full for k, full in known.items()
-                   if len(k.split()) > len(key.split())
-                   and k.split()[0] == first and k.split()[-1] == last]
-        if len(matches) == 1:
+    # Same given name and same family name is the same person, whatever sits
+    # between or after them: "Daniel Sheehan" is the "Daniel Peter Sheehan" of
+    # the description, and "Tom O'Neill, PhD" is Tom O'Neill. A differing given
+    # name still blocks it, so siblings stay apart.
+    first, last = _parts(name)
+    if first and last:
+        matches = [full for full in known.values() if _parts(full) == (first, last)]
+        if len({_fold(m) for m in matches}) == 1:
             return matches[0], True
 
     # Surname-only resolution applies to a *bare* surname and nothing else.
@@ -231,7 +278,8 @@ class Violation:
                 and self.detail == other.detail and self.paragraphs == other.paragraphs)
 
 
-def check(t: dict, result: dict) -> tuple[dict, list[Violation]]:
+def check(t: dict, result: dict,
+          corpus: dict[str, str] | None = None) -> tuple[dict, list[Violation]]:
     """Validate an attribution against the video, before it reaches the document.
 
     Returns a corrected result and the constraints it broke. Corrections are
@@ -239,7 +287,7 @@ def check(t: dict, result: dict) -> tuple[dict, list[Violation]]:
     account for is demoted to low confidence rather than deleted — being unsure
     about a real person is recoverable, erasing them is not.
     """
-    known = known_people(t)
+    known = known_people(t, corpus)
     labels = list(result.get("labels") or [])
     violations: list[Violation] = []
 

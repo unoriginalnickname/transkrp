@@ -112,6 +112,8 @@ Works out speaker names and attributes each paragraph to one, by running the
 [`claude`](https://claude.com/claude-code) CLI. **No API key** — it uses the
 Claude Code you already have. Roughly ten seconds per short episode.
 
+Needs two extra packages, which the core does not: `pip install ".[speakers]"`.
+
 ```
 transkrp "https://www.youtube.com/watch?v=..." --speakers
 ```

@@ -34,7 +34,10 @@ classifiers = [
 dependencies = ["yt-dlp>=2026.7.4"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# --speakers only. The core stays on its single dependency: fetching a
+# transcript needs neither of these, and most people never run attribution.
+speakers = ["nameparser>=1.1", "rapidfuzz>=3"]
+dev = ["pytest>=8", "nameparser>=1.1", "rapidfuzz>=3"]
 
 [project.scripts]
 transkrp = "transkrp:cli"
