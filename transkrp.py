@@ -107,10 +107,6 @@ _NO_SUBS = re.compile(r"subtitles are disabled|no subtitles", re.I)
 _AGE = re.compile(r"confirm your age|age.?restricted|inappropriate for some users", re.I)
 
 
-def _looks_rate_limited(msg: str) -> bool:
-    return bool(_BLOCKED.search(msg))
-
-
 def _classify(msg: str) -> type[LookupError]:
     if _BLOCKED.search(msg):
         return RateLimited

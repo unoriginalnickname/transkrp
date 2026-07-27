@@ -1102,7 +1102,6 @@ def test_an_age_gate_is_not_mistaken_for_a_block():
     out a rate limit that was not happening.
     """
     msg = "Sign in to confirm your age. This video may be inappropriate for some users."
-    assert not tk._looks_rate_limited(msg)
     assert tk._classify(msg) is tk.Unavailable
 
 
@@ -1167,14 +1166,14 @@ def test_an_age_gated_video_does_not_abort_a_batch_run(monkeypatch, tmp_path, ca
     "YouTube is blocking requests from your IP",
 ])
 def test_block_messages_are_recognised(msg):
-    assert tk._looks_rate_limited(msg)
+    assert tk._classify(msg) is tk.RateLimited
 
 
 @pytest.mark.parametrize("msg", [
     "Video unavailable", "Private video", "This video is age-restricted",
 ])
 def test_ordinary_failures_are_not_mistaken_for_a_block(msg):
-    assert not tk._looks_rate_limited(msg)
+    assert tk._classify(msg) is not tk.RateLimited
 
 
 def test_a_block_stops_the_run(monkeypatch, tmp_path, capsys):
