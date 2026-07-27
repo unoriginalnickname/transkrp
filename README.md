@@ -102,11 +102,41 @@ does this.
 
 **Expect it to be absent.** The marker is a broadcast-captioning convention, and
 YouTube's ASR mostly doesn't emit it. Measured on a 30-episode interview
-playlist: **`turns: 1` on all 30** — two people talking, no marker anywhere, so
-speaker changes are invisible in the output. A televised congressional hearing,
-by contrast, carried 474. If you're transcribing podcasts, assume no speaker
-structure at all; if you need it, the answer is audio diarization
-([ADR 0005](docs/adr/0005-turns-not-speakers.md)), which is a different tool.
+playlist: **`turns: 1` on all 30** — two people talking, no marker anywhere. A
+televised congressional hearing, by contrast, carried 474. For podcasts, assume
+no speaker structure — or use `--speakers`.
+
+## Who said what (`--speakers`)
+
+Works out speaker names and attributes each paragraph to one, by running the
+[`claude`](https://claude.com/claude-code) CLI. **No API key** — it uses the
+Claude Code you already have. Roughly ten seconds per short episode.
+
+```
+transkrp "https://www.youtube.com/watch?v=..." --speakers
+```
+
+```
+[00:01] **Jesse Michels**: on august 9 1969 charles manson led a group of...
+[04:36] **Tom O'Neill?**: even lived with dennis wilson of the beach boys...
+```
+
+The names come from the video's own metadata, not from the transcript — the
+channel is the host, and the description names the guest *spelled correctly*.
+That last part is the whole trick: ASR mangles exactly the proper nouns a
+cross-referencing corpus is built from. The description says **Tom O'Neill**;
+the transcript says "tom o'neil". It says **Daniel Peter Sheehan**; the
+transcript says "Danny shean".
+
+**`?` means the model was inferring, not certain**, and most labels in a
+narrated video carry it — clips, voiceover and archival audio make turn-taking
+genuinely ambiguous. A paragraph it won't commit to is left unattributed
+entirely. Treat a `?` as a lead, not a fact; the timestamp links to the second
+of video that settles it.
+
+Attribution is generated rather than transcribed, so it never touches the
+verbatim text, lives in its own field, and says so in the frontmatter
+([ADR 0011](docs/adr/0011-exhaust-the-metadata-before-generating.md)).
 
 ## Subtitle files
 

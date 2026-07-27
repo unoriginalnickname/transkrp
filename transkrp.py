@@ -877,12 +877,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="don't refetch videos already written to the output "
                          "directory; use this to resume an interrupted run")
     ap.add_argument("--speakers", action="store_true",
-                    help="work out who said what, by name, via the Claude API "
-                         "(costs money; prints an estimate first)")
+                    help="work out who said what, by name, using the `claude` "
+                         "CLI (no API key; slow)")
     ap.add_argument("--model", default=None, metavar="ID",
-                    help="model for --speakers (default claude-opus-5)")
-    ap.add_argument("--yes", "-y", action="store_true",
-                    help="skip the cost confirmation for --speakers")
+                    help="model for --speakers (default: whatever claude uses)")
     ap.add_argument("--playlist", action="store_true",
                     help="for a URL that names a video inside a playlist, take "
                          "the whole playlist rather than just that video")
@@ -948,8 +946,9 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 1
 
-    # One confirmation and one running total for the whole run, not per video.
-    spent = {"asked": False, "declined": False, "usd": 0.0}
+    # Set once if the claude CLI turns out to be missing, so a 40-video run
+    # says so once instead of forty times.
+    speaker_state = {"off": False}
     docs, failed, skipped, done, fetched = [], 0, 0, 0, False
     for url in urls:
         if args.skip_existing and not args.force and not to_stdout:
@@ -986,7 +985,7 @@ def main(argv: list[str] | None = None) -> int:
         done += 1
 
         if args.speakers:
-            _attribute(t, args, spent)
+            _attribute(t, args, speaker_state)
 
         if to_stdout:
             # Keep JSON as objects: several documents concatenated are not JSON,
@@ -1020,62 +1019,38 @@ def main(argv: list[str] | None = None) -> int:
         if failed:
             parts.append(f"{failed} failed")
         print(f"{', '.join(parts)} of {len(urls)}", file=sys.stderr)
-    if spent["usd"]:
-        print(f"speaker attribution cost roughly ${spent['usd']:.2f}", file=sys.stderr)
     return 1 if failed else 0
 
 
-def _attribute(t: dict, args, spent: dict) -> None:
-    """Add speaker labels, announcing the cost before the first one is spent.
+def _attribute(t: dict, args, state: dict) -> None:
+    """Add speaker labels via the `claude` CLI.
 
-    A tool that quietly bills an API account is a tool people stop trusting, so
-    the estimate is printed and — unless --yes — confirmed. Confirmation happens
-    once per run, not once per video: a 40-video playlist shouldn't ask 40 times.
+    No cost gate here, deliberately: this runs on whatever Claude Code plan the
+    user already has rather than billing an API account, so there is no separate
+    charge to warn about. It is still slow — a minute or two per hour of talk —
+    which is why it stays opt-in.
     """
     import speakers
 
-    n_words = len(t.get("text", "").split())
-    cost = speakers.estimate_usd(n_words, args.model or speakers.DEFAULT_MODEL)
-    if not spent["asked"]:
-        spent["asked"] = True
-        shown = f"~${cost:.2f} for this video" if cost else "an unknown amount"
-        print(f"--speakers calls the Claude API and costs money ({shown}"
-              f"{', more for the rest of the run' if not args.yes else ''}).",
-              file=sys.stderr)
-        if not args.yes and not _confirm():
-            spent["declined"] = True
-    if spent["declined"]:
+    if state["off"]:
         return
-
     try:
-        result = speakers.attribute(t, args.model or speakers.DEFAULT_MODEL)
+        result = speakers.attribute(t, args.model)
     except speakers.NotAvailable as e:
+        # Missing CLI fails identically for every video; say it once.
         print(f"  speakers: {e}", file=sys.stderr)
-        spent["declined"] = True  # it will fail the same way for every video
+        state["off"] = True
         return
     except LookupError as e:
         print(f"  speakers: {e}", file=sys.stderr)
         return
 
     speakers.apply(t, result)
-    if cost:
-        spent["usd"] += cost
+    unattributed = result["unattributed"]
     print(f"  speakers: {', '.join(result['speakers']) or 'none identified'}"
           f" ({result['attributed']} of {len(t['paragraphs'])} paragraphs"
-          f"{f', {result['unattributed']} unattributed' if result['unattributed'] else ''})",
+          f"{f', {unattributed} unattributed' if unattributed else ''})",
           file=sys.stderr)
-
-
-def _confirm() -> bool:
-    """Ask once. A non-tty (piped, cron) declines rather than blocking forever."""
-    if not sys.stdin or not sys.stdin.isatty():
-        print("  not a terminal - skipping speaker attribution. Pass --yes to run it.",
-              file=sys.stderr)
-        return False
-    try:
-        return input("  proceed? [y/N] ").strip().lower() in ("y", "yes")
-    except EOFError:
-        return False
 
 
 def _stdout_doc(docs: list, as_json: bool) -> str:
