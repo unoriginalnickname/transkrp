@@ -721,7 +721,89 @@ def test_markdown_marks_only_the_change_of_turn():
         {"start_ms": 2, "timestamp": "00:02", "turn": 1, "text": "c"},
     ])
     body = tk.to_markdown(t)
-    assert "[00:00] a" in body and "[00:01] >> b" in body and "[00:02] c" in body
+    assert ") a" in body and ") >> b" in body and ") c" in body
+    assert body.count(">>") == 1  # only the change, not every paragraph after it
+
+
+# --------------------------------------------------------------------------
+# structure and provenance the metadata already carried
+# --------------------------------------------------------------------------
+
+def test_timestamps_link_into_the_video():
+    """One click to the audio, rather than a manual scrub to 1:04:50."""
+    t = doc(url="https://www.youtube.com/watch?v=vid12345678",
+            paragraphs=[{"start_ms": 3_890_000, "timestamp": "1:04:50",
+                         "turn": 0, "text": "x"}])
+    assert "[1:04:50](https://www.youtube.com/watch?v=vid12345678&t=3890s)" in tk.to_markdown(t)
+
+
+def test_the_link_is_rebuilt_not_appended():
+    """The given URL may already carry &list=, &index= or its own &t=."""
+    t = doc(url="https://www.youtube.com/watch?v=vid12345678&list=PLxyz&index=4&t=99s")
+    assert "watch?v=vid12345678&t=0s)" in tk.to_markdown(t)
+    assert "list=PLxyz" not in tk.to_markdown(t).split("\n\n")[-1]
+
+
+def test_chapters_become_headings():
+    """The creator's own section titles - structure the document already had."""
+    t = doc(chapters=[{"start_ms": 0, "timestamp": "00:00", "title": "Intro"},
+                      {"start_ms": 2000, "timestamp": "00:02", "title": "The good bit"}],
+            paragraphs=[{"start_ms": 0, "timestamp": "00:00", "turn": 0, "text": "a"},
+                        {"start_ms": 3000, "timestamp": "00:03", "turn": 0, "text": "b"}])
+    body = tk.to_markdown(t)
+    assert "## Intro" in body and "## The good bit" in body
+    assert body.index("## Intro") < body.index(") a") < body.index("## The good bit")
+
+
+def test_a_chapter_past_the_last_paragraph_is_not_lost_silently():
+    """It simply has no paragraphs under it; better than a heading mid-sentence."""
+    t = doc(chapters=[{"start_ms": 999_000, "timestamp": "16:39", "title": "Outro"}])
+    assert "## Outro" not in tk.to_markdown(t)
+
+
+def test_no_chapters_no_headings():
+    assert "##" not in tk.to_markdown(doc(chapters=[]))
+
+
+def test_untitled_chapters_are_dropped():
+    """yt-dlp invents "<Untitled Chapter 1>" for gaps; a heading saying nothing
+    is worse than no heading."""
+    info = {"chapters": [{"start_time": 0, "title": "<Untitled Chapter 1>"},
+                         {"start_time": 60, "title": "Real Section"},
+                         {"start_time": 90, "title": "   "}]}
+    assert tk._chapters(info) == [{"start_ms": 60_000, "timestamp": "01:00",
+                                   "title": "Real Section"}]
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("20240822", "2024-08-22"), ("", ""), (None, ""), ("2024", ""), ("notadate", ""),
+])
+def test_upload_date_is_humanised(raw, want):
+    assert tk._date(raw) == want
+
+
+def test_provenance_reaches_the_frontmatter():
+    body = tk.to_markdown(doc(channel="Jesse Michels", upload_date="2024-08-22"))
+    assert "channel: Jesse Michels" in body and "published: 2024-08-22" in body
+
+
+def test_missing_provenance_is_omitted_not_blank():
+    body = tk.to_markdown(doc(channel="", upload_date=""))
+    assert "channel:" not in body and "published:" not in body
+
+
+def test_transcript_carries_provenance_and_chapters(monkeypatch):
+    monkeypatch.setattr(tk, "probe", lambda url, proxy=None, cookies=None: {
+        "title": "T", "id": "vid12345678", "language": "en", "duration": 600,
+        "uploader": "Some Channel", "upload_date": "20240822",
+        "chapters": [{"start_time": 0, "title": "Intro"}],
+        "subtitles": {"en": [{"ext": "json3", "url": "http://j"}]},
+        "automatic_captions": {}})
+    monkeypatch.setattr(tk, "_get", lambda url, tries=4, proxy=None: payload(ev(0, 1000, "Hi.")))
+    t = tk.transcript("http://x")
+    assert t["channel"] == "Some Channel"
+    assert t["upload_date"] == "2024-08-22"
+    assert t["chapters"] == [{"start_ms": 0, "timestamp": "00:00", "title": "Intro"}]
 
 
 def test_markdown_warns_about_machine_translation():

@@ -583,6 +583,14 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
     # in music is minutes short of the runtime. Prefer what the metadata says.
     duration = info.get("duration")
     return {
+        # Provenance. A knowledge file that doesn't say who said this, or when,
+        # is a quote with the attribution torn off.
+        "channel": info.get("uploader") or info.get("channel") or "",
+        "upload_date": _date(info.get("upload_date")),
+        # The creator's own section titles, which YouTube has and we were
+        # throwing away. Verbatim structure for free: a 33,000-word interview
+        # has 19 of these, and without them it is one undifferentiated wall.
+        "chapters": _chapters(info),
         "title": info.get("title", ""),
         "video_id": info.get("id", ""),
         "url": url,
@@ -610,6 +618,30 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
     }
 
 
+def _date(yyyymmdd: str | None) -> str:
+    """yt-dlp gives 20240822; a human reads 2024-08-22."""
+    if not (yyyymmdd and len(yyyymmdd) == 8 and yyyymmdd.isdigit()):
+        return ""
+    return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
+
+
+def _chapters(info: dict) -> list[dict]:
+    """The creator's section titles, as [{start_ms, timestamp, title}].
+
+    yt-dlp invents "<Untitled Chapter 1>" to fill gaps where the creator titled
+    some sections but not others. A heading that says nothing is worse than no
+    heading, so those are dropped rather than rendered.
+    """
+    out = []
+    for c in info.get("chapters") or []:
+        title = (c.get("title") or "").strip()
+        if not title or re.fullmatch(r"<untitled chapter \d+>", title, re.I):
+            continue
+        ms = int(float(c.get("start_time") or 0) * 1000)
+        out.append({"start_ms": ms, "timestamp": stamp(ms), "title": title})
+    return out
+
+
 def slug(title: str, video_id: str, limit: int = 60) -> str:
     """A findable filename: title slug + id.
 
@@ -621,9 +653,14 @@ def slug(title: str, video_id: str, limit: int = 60) -> str:
 
 
 def to_markdown(t: dict) -> str:
-    head = ["---", f"title: {t['title']}", f"url: {t['url']}",
-            f"source: {t['source']}", f"lang: {t['lang']}",
-            f"punctuated: {str(t['punctuated']).lower()}"]
+    head = ["---", f"title: {t['title']}"]
+    if t.get("channel"):
+        head.append(f"channel: {t['channel']}")
+    if t.get("upload_date"):
+        head.append(f"published: {t['upload_date']}")
+    head += [f"url: {t['url']}",
+             f"source: {t['source']}", f"lang: {t['lang']}",
+             f"punctuated: {str(t['punctuated']).lower()}"]
     if t["translated"]:
         head.append("translated: true  # machine translation of machine transcription")
     if t["turns"] > 1:
@@ -636,13 +673,35 @@ def to_markdown(t: dict) -> str:
     # greppable. A horizontal rule per turn would mean 500+ rules in a long
     # interview, which is heavier than the dialogue it annotates. The dict's
     # `text` stays clean; the marker is presentation.
+    # Chapters become headings. They are the creator's own section titles, so
+    # this is structure the document already had and was discarding — a
+    # 33,000-word interview reads as one wall without them.
+    pending = list(t.get("chapters") or [])
     lines, prev_turn = [], None
     for p in t["paragraphs"]:
+        while pending and pending[0]["start_ms"] <= p["start_ms"]:
+            lines.append(f"## {pending.pop(0)['title']}")
         new_turn = prev_turn is not None and p["turn"] != prev_turn
         marker = ">> " if new_turn else ""
-        lines.append(f"[{p['timestamp']}] {marker}{p['text']}")
+        # The timestamp links into the video at that second. The whole point of
+        # anchoring every paragraph is that a load-bearing claim can be checked
+        # against the audio, and that is a different proposition when it is one
+        # click rather than a manual scrub.
+        lines.append(f"[{p['timestamp']}]({_at(t['url'], p['start_ms'])}) {marker}{p['text']}")
         prev_turn = p["turn"]
     return "\n".join(head) + f"\n\n# {t['title']}\n\n" + "\n\n".join(lines) + "\n"
+
+
+def _at(url: str, ms: int) -> str:
+    """The same video, at that second.
+
+    Rebuilt from the id rather than appended to the given URL, which may already
+    carry &list=, &index=, a playlist position, or its own &t= from wherever it
+    was copied.
+    """
+    vid = video_id(url)
+    base = f"https://www.youtube.com/watch?v={vid}" if vid else url.split("&")[0]
+    return f"{base}&t={ms // 1000}s" if vid else base
 
 
 def to_srt(t: dict) -> str:

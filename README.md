@@ -71,18 +71,30 @@ subclasses are there when the difference matters — each implies a different mo
 
 ```
 ---
-title: ...
-source: auto
+title: The Man Involved In Every American Conspiracy
+channel: Jesse Michels
+published: 2024-08-22
+url: https://www.youtube.com/watch?v=2SQXAPCdmPE
+source: manual
 lang: en
-punctuated: true
-turns: 518
+punctuated: false
+note: unpunctuated speech recognition - no sentence breaks or speaker labels
 ---
 
-[13:03] >> Right.
+# The Man Involved In Every American Conspiracy
 
-[13:04] >> So if you think the apocalypse is lingering, there's all sorts of
-things you're not going to do or bother investigating...
+## Government UFO Disclosure
+
+[04:12](https://www.youtube.com/watch?v=2SQXAPCdmPE&t=252s) so the thing about
+the Blue Book files is that...
 ```
+
+Headings are the creator's own chapter titles, taken from the video's metadata —
+so a 33,000-word interview arrives as 19 navigable sections rather than one wall.
+Every timestamp links to that second of the video, which is what makes "check it
+against the audio" a click instead of a scrub. Neither is generated; both were
+sitting in the data already being fetched
+([ADR 0011](docs/adr/0011-exhaust-the-metadata-before-generating.md)).
 
 `>>` marks a speaker change — the standard caption convention. It says the
 speaker *changed*, not who they are; the tracks don't carry names, so neither
