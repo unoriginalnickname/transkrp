@@ -702,6 +702,8 @@ def to_markdown(t: dict) -> str:
         head.append(f"speakers_inferred_by: {t.get('speakers_by', '')}  "
                     f"# attribution is generated, not from the captions; "
                     f"'?' marks low confidence")
+        for flag in t.get("speakers_flagged") or []:
+            head.append(f"speakers_flagged: {flag}")
     elif t["turns"] > 1:
         head.append(f"turns: {t['turns']}  # speaker changes; who is speaking is not marked")
     if not t["punctuated"]:

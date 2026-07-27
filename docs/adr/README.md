@@ -25,6 +25,7 @@ once accepted — superseded by a later record instead.
 | [0009](0009-batch-runs-resume.md) | Batch runs resume instead of restarting | Accepted |
 | [0010](0010-ci-runs-offline-only.md) | CI runs the offline suite only | Accepted |
 | [0011](0011-exhaust-the-metadata-before-generating.md) | Exhaust the metadata before generating anything | Accepted |
+| [0012](0012-validate-the-model-against-a-domain-model.md) | Validate the model's answer against a domain model | Accepted |
 
 The survey these draw on is
 [docs/research/2026-07-youtube-transcript-extraction.md](../research/2026-07-youtube-transcript-extraction.md)

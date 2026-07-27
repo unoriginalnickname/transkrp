@@ -176,10 +176,12 @@ def test_labels_land_on_their_paragraphs(replies):
                         {"n": 2, "speaker": "Daniel Sheehan", "confidence": "high"},
                         {"n": 3, "speaker": "Daniel Sheehan", "confidence": "low"},
                         {"n": 4, "speaker": None, "confidence": "low"}]})
-    got = speakers.attribute(interview())
-    assert got["speakers"] == ["Jesse Michels", "Daniel Sheehan"]
+    got = speakers.attribute(interview(), retry=False)
+    # "Daniel Sheehan" is canonicalised to the description's fuller spelling -
+    # the validator doing its job, not a mismatch.
+    assert got["speakers"] == ["Jesse Michels", "Daniel Peter Sheehan"]
     assert [l and l["speaker"] for l in got["labels"]] == [
-        "Jesse Michels", "Daniel Sheehan", "Daniel Sheehan", None]
+        "Jesse Michels", "Daniel Peter Sheehan", "Daniel Peter Sheehan", None]
     assert got["attributed"] == 3 and got["unattributed"] == 1
 
 

@@ -32,6 +32,8 @@ import re
 import shutil
 import subprocess
 
+import ontology
+
 PARAGRAPHS_PER_REQUEST = 40
 # Per call. A batch of 40 paragraphs is a few thousand words in and a few
 # hundred tokens out; anything slower than this is a hang, not a long think.
@@ -137,7 +139,7 @@ def _context(t: dict) -> str:
 
 def attribute(t: dict, model: str | None = None,
               per_request: int = PARAGRAPHS_PER_REQUEST,
-              progress=None) -> dict:
+              progress=None, retry: bool = True) -> dict:
     """Attribute one transcript's paragraphs to named speakers.
 
     Returns {"speakers": [names], "labels": [{speaker, confidence} | None, ...]},
@@ -174,10 +176,59 @@ def attribute(t: dict, model: str | None = None,
         if progress:
             progress(min(start + per_request, len(paras)), len(paras))
 
-    return {"speakers": names, "labels": labels,
-            "model": model or "claude (cli default)",
-            "attributed": sum(1 for x in labels if x and x.get("speaker")),
-            "unattributed": sum(1 for x in labels if not (x and x.get("speaker")))}
+    result = {"speakers": names, "labels": labels,
+              "model": model or "claude (cli default)",
+              "attributed": sum(1 for x in labels if x and x.get("speaker")),
+              "unattributed": sum(1 for x in labels if not (x and x.get("speaker")))}
+    return validated(t, result, model, retry=retry)
+
+
+def validated(t: dict, result: dict, model: str | None, retry: bool = True) -> dict:
+    """Run the answer past the domain model before anyone sees it.
+
+    This is the ledger check, and the loop Coyle describes: an unreasonable
+    result goes back to the model with the reason, once. One retry rather than a
+    loop on purpose — his own warning is that loops drift and cost money, and a
+    second disagreement is a signal to stop and report, not to keep asking.
+    """
+    corrected, violations = ontology.check(t, result)
+    if not violations or not retry:
+        corrected["violations"] = [v.detail for v in violations]
+        return corrected
+
+    known = ontology.known_people(t)
+    hint = ontology.retry_hint(violations, known)
+    paras = t.get("paragraphs") or []
+    numbered = "\n\n".join(f"[{i}] {p['text']}" for i, p in enumerate(paras, 1))
+    try:
+        second = _parse(_run(
+            f"{PROMPT}\n\n{_context(t)}\n\n{hint}\n\n"
+            f"--- transcript ---\n\n{numbered}", model))
+    except LookupError:
+        second = {}
+
+    if not second.get("labels"):
+        corrected["violations"] = [v.detail for v in violations]
+        return corrected
+
+    retried = {"speakers": second.get("speakers") or [],
+               "labels": [None] * len(paras),
+               "model": result.get("model", "")}
+    for entry in second["labels"]:
+        n = entry.get("n")
+        if isinstance(n, int) and 0 < n <= len(paras):
+            retried["labels"][n - 1] = {"speaker": entry.get("speaker"),
+                                        "confidence": entry.get("confidence") or "low"}
+
+    second_pass, still = ontology.check(t, retried)
+    # Keep whichever answer the domain model likes better. A retry that breaks
+    # more constraints than the original is not an improvement.
+    if len(still) < len(violations):
+        second_pass["violations"] = [v.detail for v in still]
+        second_pass["retried"] = True
+        return second_pass
+    corrected["violations"] = [v.detail for v in violations]
+    return corrected
 
 
 def apply(t: dict, result: dict) -> dict:
@@ -193,4 +244,9 @@ def apply(t: dict, result: dict) -> dict:
             p["speaker_confidence"] = label.get("confidence", "low")
     t["speakers"] = result.get("speakers") or []
     t["speakers_by"] = result.get("model", "")
+    # Carried into the document rather than logged and forgotten: a reader
+    # deciding whether to trust an attribution needs to know the domain model
+    # objected to it.
+    if flagged := result.get("violations"):
+        t["speakers_flagged"] = flagged
     return t
