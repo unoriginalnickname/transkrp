@@ -82,10 +82,26 @@ def _extract(url: str, **extra) -> dict:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:  # unavailable, private, bad URL
-        msg = str(e).replace("ERROR: ", "").strip()
-        if _AGE.search(msg) and not opts.get("cookiefile") and not opts.get("cookiesfrombrowser"):
-            msg += " - retry with --cookies firefox (or your browser)"
+        msg = _tidy(str(e))
+        have_cookies = opts.get("cookiefile") or opts.get("cookiesfrombrowser")
+        if _NEEDS_AUTH.search(msg) and not have_cookies:
+            msg += " - if you have access, retry with --cookies firefox (or your browser)"
         raise _classify(msg)(msg) from e
+
+
+def _tidy(msg: str) -> str:
+    """Cut yt-dlp's advice, which names yt-dlp's flags rather than ours.
+
+    A private video arrives as 457 characters ending in two wiki URLs and "Use
+    --cookies-from-browser or --cookies for the authentication" — and this CLI
+    has no --cookies-from-browser. Pointing someone at an option that does not
+    exist is worse than saying nothing, and it is exactly the failure ADR 0007
+    exists to prevent. The video id goes too: the caller already prints the URL.
+    """
+    msg = msg.replace("ERROR: ", "")
+    msg = re.split(r"\s*(?:Use --cookies|(?:Also s|S)ee\s+https?://)", msg)[0]
+    msg = re.sub(r"^\[[\w:]+\]\s*[\w-]{11}:\s*", "", msg.strip())
+    return msg.strip().rstrip(".")
 
 
 # yt-dlp reports all of this as free text, so this is pattern-matching on prose.
@@ -103,8 +119,10 @@ _GONE = re.compile(r"video unavailable|private video|has been removed|"
                    r"account.*terminated|not available in your country|"
                    r"confirm your age|age.?restricted|members[- ]only", re.I)
 _NO_SUBS = re.compile(r"subtitles are disabled|no subtitles", re.I)
-# An age gate is the one Unavailable the user can actually do something about.
-_AGE = re.compile(r"confirm your age|age.?restricted|inappropriate for some users", re.I)
+# The Unavailables a user can actually do something about, given an account.
+_NEEDS_AUTH = re.compile(r"confirm your age|age.?restricted|"
+                         r"inappropriate for some users|private video|"
+                         r"members[- ]only", re.I)
 
 
 def _classify(msg: str) -> type[LookupError]:
@@ -153,9 +171,28 @@ _VIDEO_URL = re.compile(r"[?&]v=[\w-]{11}|youtu\.be/[\w-]{11}|/shorts/[\w-]{11}"
 _LIST_URL = re.compile(r"/playlist|/channel/|/@|/c/|/user/|[?&]list=", re.I)
 
 
-def is_playlist_url(url: str) -> bool:
-    """Does this URL name several videos rather than one?"""
+def is_playlist_url(url: str, force: bool = False) -> bool:
+    """Does this URL name several videos rather than one?
+
+    A `v=` id wins over `list=` unless `force` says otherwise, so pasting
+    YouTube's share link fetches the video you were watching rather than the 200
+    around it. `--playlist` is the override, and `is_ambiguous` below is why it
+    had to exist: the assumption is right often, not always.
+    """
+    if force and _LIST_URL.search(url):
+        return True
     return not _VIDEO_URL.search(url) and bool(_LIST_URL.search(url))
+
+
+def is_ambiguous(url: str) -> bool:
+    """A URL naming a video *and* the playlist it sits in — it could mean either.
+
+    Worth saying out loud rather than silently picking. The first person to hand
+    this tool such a URL called it "a playlist" and meant all 40 videos; the
+    default gave them 1, correctly by the documented rule and wrongly by intent.
+    Guessing better is impossible, so the fix is to say which reading was used.
+    """
+    return bool(_VIDEO_URL.search(url) and _LIST_URL.search(url))
 
 
 def video_id(url: str) -> str | None:
@@ -169,13 +206,14 @@ def video_id(url: str) -> str | None:
     return m.group(0)[-11:] if m else None
 
 
-def expand(url: str, proxy: str | None = None, cookies: str | None = None) -> list[str]:
+def expand(url: str, proxy: str | None = None, cookies: str | None = None,
+           force_playlist: bool = False) -> list[str]:
     """Resolve one URL to video URLs; a playlist or channel becomes its entries.
 
     Flat extraction, so a 200-video playlist costs one request instead of 200 —
     each video is probed later anyway, and only if we get that far.
     """
-    if not is_playlist_url(url):
+    if not is_playlist_url(url, force_playlist):
         return [url]
     info = _extract(url, extract_flat="in_playlist", proxy=proxy, **_cookie_opts(cookies))
     if info.get("_type") != "playlist":
@@ -741,6 +779,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="don't refetch videos already written to the output "
                          "directory; use this to resume an interrupted run")
+    ap.add_argument("--playlist", action="store_true",
+                    help="for a URL that names a video inside a playlist, take "
+                         "the whole playlist rather than just that video")
     ap.add_argument("--force", action="store_true",
                     help="refetch even what --skip-existing would skip; use when "
                          "a video's captions have been corrected")
@@ -761,10 +802,21 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace", newline="\n")
 
     try:
-        urls = [v for u in args.url for v in expand(u, args.proxy, args.cookies)]
+        urls = [v for u in args.url
+                for v in expand(u, args.proxy, args.cookies, args.playlist)]
     except LookupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+
+    # Say which reading of an ambiguous URL was used. Both are defensible and
+    # the tool cannot know which was meant, so silently picking one is how a
+    # person asks for 40 videos and gets 1 without ever finding out why.
+    if not args.playlist:
+        for u in args.url:
+            if is_ambiguous(u):
+                print(f"note: {u.split('&list=')[0]}...&list=... names one video "
+                      f"inside a playlist; fetching just that video. "
+                      f"--playlist takes the whole list.", file=sys.stderr)
 
     if args.list:
         return max((_list(u, args.proxy, args.cookies) for u in urls), default=0)

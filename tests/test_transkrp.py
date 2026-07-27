@@ -572,6 +572,47 @@ def test_video_urls(url):
     assert tk.is_playlist_url(url) is False
 
 
+def test_a_watch_url_inside_a_playlist_is_ambiguous():
+    """Found by handing the tool a real URL: it was called "a playlist" and the
+    default read it as one video. Both readings are defensible."""
+    assert tk.is_ambiguous("https://www.youtube.com/watch?v=G7Ns4Aq1tVc&list=PLpvZy")
+    assert not tk.is_ambiguous("https://www.youtube.com/watch?v=G7Ns4Aq1tVc")
+    assert not tk.is_ambiguous("https://www.youtube.com/playlist?list=PLpvZy")
+
+
+def test_playlist_flag_overrides_the_video_id():
+    url = "https://www.youtube.com/watch?v=G7Ns4Aq1tVc&list=PLpvZy"
+    assert tk.is_playlist_url(url) is False
+    assert tk.is_playlist_url(url, force=True) is True
+
+
+def test_playlist_flag_does_not_invent_a_playlist():
+    """--playlist on a URL with no list= at all is still one video."""
+    assert tk.is_playlist_url("https://youtu.be/G7Ns4Aq1tVc", force=True) is False
+
+
+def test_cli_says_which_reading_it_used(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: doc())
+    tk.main(["https://www.youtube.com/watch?v=G7Ns4Aq1tVc&list=PLpvZy",
+             "-o", str(tmp_path / "o.md")])
+    err = capsys.readouterr().err
+    assert "just that video" in err and "--playlist" in err
+
+
+def test_no_note_when_the_url_is_unambiguous(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: doc())
+    tk.main(["https://youtu.be/G7Ns4Aq1tVc", "-o", str(tmp_path / "o.md")])
+    assert "note:" not in capsys.readouterr().err
+
+
+def test_no_note_when_playlist_was_asked_for(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(tk, "expand", lambda u, *a, **k: ["http://a"])
+    monkeypatch.setattr(tk, "transcript", lambda url, *a, **k: doc())
+    tk.main(["https://www.youtube.com/watch?v=G7Ns4Aq1tVc&list=PLpvZy",
+             "--playlist", "-o", str(tmp_path / "o.md")])
+    assert "note:" not in capsys.readouterr().err
+
+
 def test_expand_leaves_a_video_url_alone(monkeypatch):
     monkeypatch.setattr(tk, "_extract", lambda *a, **k: pytest.fail("should not extract"))
     assert tk.expand("https://youtu.be/jNQXAC9IVRw") == ["https://youtu.be/jNQXAC9IVRw"]
@@ -904,8 +945,7 @@ def test_cli_error_exits_nonzero(monkeypatch, capsys):
 
 def test_cli_expands_a_playlist(monkeypatch, tmp_path):
     seen = []
-    monkeypatch.setattr(tk, "expand",
-                        lambda u, proxy=None, cookies=None: ["http://a", "http://b", "http://c"])
+    monkeypatch.setattr(tk, "expand", lambda u, *a, **k: ["http://a", "http://b", "http://c"])
     monkeypatch.setattr(tk, "transcript",
                         lambda url, *a, **k: seen.append(url) or doc(title=url[-1]))
     monkeypatch.setattr(tk.time, "sleep", lambda s: None)
@@ -1103,6 +1143,48 @@ def test_an_age_gate_is_not_mistaken_for_a_block():
     """
     msg = "Sign in to confirm your age. This video may be inappropriate for some users."
     assert tk._classify(msg) is tk.Unavailable
+
+
+PRIVATE = ("ERROR: [youtube] ePdH01pphbk: Private video. Sign in if you've been "
+           "granted access to this video. Use --cookies-from-browser or --cookies "
+           "for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ"
+           "#how-do-i-pass-cookies-to-yt-dlp  for how to manually pass cookies. "
+           "Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors"
+           "#exporting-youtube-cookies  for tips on effectively exporting cookies")
+
+
+def test_ytdlp_noise_is_trimmed():
+    """Found by dogfooding a real playlist: 457 characters per private video.
+
+    The worst part isn't the length, it's that it names --cookies-from-browser,
+    which this CLI does not have. Naming the wrong fix is what ADR 0007 exists
+    to prevent.
+    """
+    out = tk._tidy(PRIVATE)
+    assert out == "Private video. Sign in if you've been granted access to this video"
+    assert "http" not in out
+    assert "--cookies-from-browser" not in out
+    assert len(out) < 80
+
+
+def test_tidy_leaves_an_ordinary_message_alone():
+    assert tk._tidy("ERROR: [youtube] abcdefghijk: Video unavailable") == "Video unavailable"
+
+
+def test_a_private_video_suggests_our_cookie_flag(monkeypatch):
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download=False):
+            raise tk.yt_dlp.utils.DownloadError(PRIVATE)
+
+    monkeypatch.setattr(tk.yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(tk.Unavailable) as caught:
+        tk._extract("http://x")
+    msg = str(caught.value)
+    assert "--cookies firefox" in msg          # the flag we actually have
+    assert "--cookies-from-browser" not in msg  # not yt-dlp's
 
 
 def test_an_age_gate_names_the_fix(monkeypatch):

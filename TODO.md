@@ -1,8 +1,22 @@
 # TODO
 
-**Nothing outstanding.** Everything on this list has been built, or checked and
-declined with the reason recorded. Kept as a record so the declined items don't
-get re-derived from scratch.
+## Worth doing
+
+- [ ] **Strip sponsor reads.** Found by dogfooding a 30-episode interview
+  playlist: every transcript opens with "huge thank you to our sponsor…
+  discount code…". For a searchable knowledge base that is pure noise, and it
+  is noise that recurs identically across every episode of a series, which is
+  exactly the shape that poisons retrieval. SponsorBlock has crowd-sourced
+  segment timings and yt-dlp already speaks to it (`--sponsorblock-mark`); the
+  work here is dropping cues whose timings fall in a sponsor segment, plus a
+  flag to control it. Would need its own ADR: a second network dependency, and
+  a decision about whether removing content silently is acceptable in a
+  document that claims to be a transcript.
+
+---
+
+Everything else has been built, or checked and declined with the reason
+recorded. Kept as a record so the declined items don't get re-derived.
 
 Decisions that *have* been made live in [docs/adr/](docs/adr/README.md), and the
 background research in

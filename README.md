@@ -88,6 +88,14 @@ things you're not going to do or bother investigating...
 speaker *changed*, not who they are; the tracks don't carry names, so neither
 does this.
 
+**Expect it to be absent.** The marker is a broadcast-captioning convention, and
+YouTube's ASR mostly doesn't emit it. Measured on a 30-episode interview
+playlist: **`turns: 1` on all 30** — two people talking, no marker anywhere, so
+speaker changes are invisible in the output. A televised congressional hearing,
+by contrast, carried 474. If you're transcribing podcasts, assume no speaker
+structure at all; if you need it, the answer is audio diarization
+([ADR 0005](docs/adr/0005-turns-not-speakers.md)), which is a different tool.
+
 ## Subtitle files
 
 `-f srt` and `-f vtt` emit the cleaned cues rather than paragraphs — a real
@@ -108,9 +116,10 @@ Tells you whether to trust the file:
 
 - `source` — `manual` (human-written) or `auto` (speech recognition).
 - `punctuated` — whether it has sentence punctuation. **Detected, not assumed:**
-  "auto" doesn't mean "raw". YouTube's newer ASR emits punctuation and speaker
-  markers; older videos' doesn't. Some manual tracks are unedited dumps with
-  neither.
+  "auto" doesn't mean "raw", and "manual" doesn't mean edited. On that same
+  30-episode playlist, 18 came back unpunctuated — *including manual tracks*,
+  which are often just an ASR export somebody uploaded. Assuming would have got
+  those wrong in both directions.
 - `translated` — an `en` auto track on a non-English video is a machine
   translation of a machine transcription. Treat with suspicion.
 - `turns` — number of speaker changes.
