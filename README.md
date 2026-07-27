@@ -58,6 +58,15 @@ t = transcript(url)          # JSON-safe dict; raises LookupError on failure
 t["paragraphs"][0]["text"]
 ```
 
+Every failure is a `LookupError`, so catching that one type is enough. Three
+subclasses are there when the difference matters — each implies a different move:
+
+| | Means | Do |
+|---|---|---|
+| `RateLimited` | refused for volume or IP reputation | wait, or use a proxy |
+| `Unavailable` | private, deleted, region-locked, age-gated | skip it for good |
+| `NoCaptions` | video is fine, no usable track | try another `lang` |
+
 ## Output
 
 ```

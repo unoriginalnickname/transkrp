@@ -1,27 +1,20 @@
 # TODO
 
-Known gaps, in rough priority order. Nothing here is half-finished work — the
-tool is complete and tested as it stands; these are things it doesn't do yet.
+**Nothing outstanding.** Everything on this list has been built, or checked and
+declined with the reason recorded. Kept as a record so the declined items don't
+get re-derived from scratch.
 
 Decisions that *have* been made live in [docs/adr/](docs/adr/README.md), and the
 background research in
 [docs/research/](docs/research/2026-07-youtube-transcript-extraction.md).
 
-## Worth doing
+## Done
 
-- [ ] **Take the good ideas from `youtube-transcript-api`.** It solves a
-  narrower problem but has had far more users find its edges. Specifically worth
-  stealing: pluggable output formatters (it emits SRT and WebVTT; we only do
-  markdown and JSON), its explicit `.translate()` API (we treat translation as a
-  warning flag rather than something you can ask for), and its more granular
-  exception types. Ideas, not code — it's MIT, so copying would be legal with
-  attribution, but a hostile repackaging of someone's library is a bad way to
-  exist.
-
-- [ ] **More granular exceptions for library users.** Everything actionable is a
-  `LookupError`, with `RateLimited` the one subclass. A caller wanting to tell
-  "video is private" from "no captions exist" has to match on message text.
-  [ADR 0007](docs/adr/0007-failure-handling.md) anticipated revisiting this.
+The three ideas worth taking from `youtube-transcript-api` have been taken —
+subtitle formatters, granular exception types, and translation access (which
+turned out to already exist via `--lang`). Ideas, not code: it's MIT, so copying
+would be legal with attribution, but a hostile repackaging of someone's library
+is a bad way to exist.
 
 ## Checked and closed without a change
 

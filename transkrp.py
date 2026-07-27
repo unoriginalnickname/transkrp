@@ -37,12 +37,30 @@ TIMEOUT = 30  # seconds; without one, urlopen waits on a stalled socket forever
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
 
+# Three failures worth telling apart, because each implies a different next move:
+# wait, skip this video forever, or try another track. Everything else stays a
+# plain LookupError, so `except LookupError` remains the whole contract for
+# callers who don't care (ADR 0007).
 class RateLimited(LookupError):
     """YouTube is refusing us for volume, not for anything about this video.
 
-    A LookupError subclass so the "catch one exception type" contract in ADR 0007
-    still holds for callers who don't care. Batch runs do care: every remaining
-    video will fail the same way, and trying them makes the block worse.
+    Batch runs care: every remaining video will fail the same way, and trying
+    them makes the block worse. Wait, or use a proxy.
+    """
+
+
+class Unavailable(LookupError):
+    """This video cannot be read, and no amount of retrying will change that.
+
+    Private, deleted, region-locked, or age-gated without cookies. Skip it.
+    """
+
+
+class NoCaptions(LookupError):
+    """The video is fine; there is no caption track we can use.
+
+    Distinct from Unavailable because the video may well have captions in some
+    other language — `--lang` is the move, not giving up.
     """
 
 
@@ -65,18 +83,42 @@ def _extract(url: str, **extra) -> dict:
             return ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:  # unavailable, private, bad URL
         msg = str(e).replace("ERROR: ", "").strip()
-        raise (RateLimited if _looks_rate_limited(msg) else LookupError)(msg) from e
+        if _AGE.search(msg) and not opts.get("cookiefile") and not opts.get("cookiesfrombrowser"):
+            msg += " - retry with --cookies firefox (or your browser)"
+        raise _classify(msg)(msg) from e
 
 
-# yt-dlp reports a block as free text, so this is pattern-matching on prose. It
-# only decides whether a batch run gives up early, so a miss costs a few wasted
-# requests rather than a wrong result.
-_BLOCKED = re.compile(r"429|too many requests|rate.?limit|sign in to confirm|"
-                      r"not a bot|block\w*[^.]*\bip\b|\bip\b[^.]*block", re.I)
+# yt-dlp reports all of this as free text, so this is pattern-matching on prose.
+# It decides whether a batch run gives up, skips, or carries on, so a miss costs
+# wasted requests or a needless abort rather than a wrong transcript.
+#
+# "Sign in to confirm" is deliberately NOT a block signal on its own: YouTube
+# says "sign in to confirm you're not a bot" for a block and "sign in to confirm
+# your age" for an age gate. Matching the shared prefix classified every
+# age-restricted video as a rate limit, which aborted the whole playlist and told
+# the user to wait out a block that was not happening.
+_BLOCKED = re.compile(r"429|too many requests|rate.?limit|not a bot|"
+                      r"block\w*[^.]*\bip\b|\bip\b[^.]*block", re.I)
+_GONE = re.compile(r"video unavailable|private video|has been removed|"
+                   r"account.*terminated|not available in your country|"
+                   r"confirm your age|age.?restricted|members[- ]only", re.I)
+_NO_SUBS = re.compile(r"subtitles are disabled|no subtitles", re.I)
+# An age gate is the one Unavailable the user can actually do something about.
+_AGE = re.compile(r"confirm your age|age.?restricted|inappropriate for some users", re.I)
 
 
 def _looks_rate_limited(msg: str) -> bool:
     return bool(_BLOCKED.search(msg))
+
+
+def _classify(msg: str) -> type[LookupError]:
+    if _BLOCKED.search(msg):
+        return RateLimited
+    if _NO_SUBS.search(msg):
+        return NoCaptions
+    if _GONE.search(msg):
+        return Unavailable
+    return LookupError
 
 
 def _cookie_opts(cookies: str | None) -> dict:
@@ -173,7 +215,7 @@ def pick_track(info: dict, want: str | None = None) -> tuple[str, str, bool]:
             return "manual", want, False
         if want in auto:
             return "auto", want, _translated(info, want)
-        raise LookupError(f"no caption track {want!r}; manual tracks are "
+        raise NoCaptions(f"no caption track {want!r}; manual tracks are "
                           f"{_names(manual)} (see --list for the auto ones)")
 
     for source, prefix in _preference(info, want):
@@ -190,9 +232,9 @@ def pick_track(info: dict, want: str | None = None) -> tuple[str, str, bool]:
     # language, --lang is the fix and the user needs to know what to pass.
     if manual or auto:
         spoken = _lang_of(info)
-        raise LookupError(f"no captions in English{f' or {spoken}' if spoken else ''}; "
+        raise NoCaptions(f"no captions in English{f' or {spoken}' if spoken else ''}; "
                           f"manual tracks are {_names(manual)} - pass --lang to pick one")
-    raise LookupError("this video has no captions at all")
+    raise NoCaptions("this video has no captions at all")
 
 
 def _lang_of(info: dict) -> str:
@@ -358,7 +400,7 @@ def segments(info: dict, source: str, key: str, proxy: str | None = None) -> lis
     fmts = info["subtitles" if source == "manual" else "automatic_captions"][key]
     json3 = next((f for f in fmts if f.get("ext") == "json3"), None)
     if not json3:
-        raise LookupError(f"track {key!r} has no json3 format")
+        raise NoCaptions(f"track {key!r} has no json3 format")
     body = _get(json3["url"], proxy=proxy)
 
     # The interesting failure here is not an error status. When the timedtext
@@ -497,7 +539,7 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
     # the cookied probe obtained. Authorisation is baked into the URL.
     segs = segments(info, source, key, proxy=proxy)
     if not segs:
-        raise LookupError(f"caption track {key!r} was empty")
+        raise NoCaptions(f"caption track {key!r} was empty")
     # "auto" does not mean "raw": YouTube's newer ASR emits punctuation and >>
     # speaker markers, while some manual tracks are unedited dumps that don't.
     # Detect it; don't infer it from the track's source.

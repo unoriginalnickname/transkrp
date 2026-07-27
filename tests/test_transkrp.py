@@ -1067,9 +1067,98 @@ def test_skips_are_not_paced(monkeypatch, tmp_path):
 # giving up when rate-limited
 # --------------------------------------------------------------------------
 
-def test_rate_limited_is_a_lookup_error():
+def test_every_failure_type_is_still_a_lookup_error():
     """Callers who don't care keep the one-exception contract of ADR 0007."""
-    assert issubclass(tk.RateLimited, LookupError)
+    for cls in (tk.RateLimited, tk.Unavailable, tk.NoCaptions):
+        assert issubclass(cls, LookupError)
+
+
+@pytest.mark.parametrize("msg,want", [
+    # blocked: wait, or use a proxy
+    ("HTTP Error 429: Too Many Requests", "RateLimited"),
+    ("Sign in to confirm you're not a bot. This helps protect our community.", "RateLimited"),
+    ("YouTube is blocking requests from your IP", "RateLimited"),
+    # gone: skip it, retrying will never help
+    ("Video unavailable", "Unavailable"),
+    ("Private video. Sign in if you've been granted access", "Unavailable"),
+    ("This video has been removed by the uploader", "Unavailable"),
+    ("This video is not available in your country", "Unavailable"),
+    ("Join this channel to get access to members-only content", "Unavailable"),
+    # the video is fine, the captions aren't there
+    ("Subtitles are disabled for this video", "NoCaptions"),
+    # nothing recognised: stays the base type rather than guessing
+    ("Unable to extract player response", "LookupError"),
+])
+def test_failures_are_classified(msg, want):
+    assert tk._classify(msg).__name__ == want
+
+
+def test_an_age_gate_is_not_mistaken_for_a_block():
+    """The bug this taxonomy found.
+
+    YouTube says "sign in to confirm you're not a bot" for a block and "sign in
+    to confirm your age" for an age gate. Matching the shared prefix made every
+    age-restricted video abort the entire playlist run, telling the user to wait
+    out a rate limit that was not happening.
+    """
+    msg = "Sign in to confirm your age. This video may be inappropriate for some users."
+    assert not tk._looks_rate_limited(msg)
+    assert tk._classify(msg) is tk.Unavailable
+
+
+def test_an_age_gate_names_the_fix(monkeypatch):
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download=False):
+            raise tk.yt_dlp.utils.DownloadError("ERROR: Sign in to confirm your age")
+
+    monkeypatch.setattr(tk.yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(tk.Unavailable, match="--cookies"):
+        tk._extract("http://x")
+
+
+def test_the_cookie_hint_is_dropped_once_cookies_are_supplied(monkeypatch):
+    """Telling someone to pass --cookies when they already did is noise."""
+    class FakeYDL:
+        def __init__(self, opts): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download=False):
+            raise tk.yt_dlp.utils.DownloadError("ERROR: Sign in to confirm your age")
+
+    monkeypatch.setattr(tk.yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(tk.Unavailable) as caught:
+        tk._extract("http://x", **tk._cookie_opts("firefox"))
+    assert "--cookies" not in str(caught.value)
+
+
+def test_missing_captions_raise_no_captions():
+    with pytest.raises(tk.NoCaptions):
+        tk.pick_track(info_with())
+    with pytest.raises(tk.NoCaptions):
+        tk.pick_track(info_with(manual=["de"], language="ja"))
+    with pytest.raises(tk.NoCaptions):
+        tk.pick_track(info_with(manual=["en"]), "zz")
+
+
+def test_an_age_gated_video_does_not_abort_a_batch_run(monkeypatch, tmp_path, capsys):
+    """The consequence of the misclassification: one age-gated video in a
+    playlist killed the other 199."""
+    calls = []
+
+    def flaky(url, *a, **k):
+        calls.append(url)
+        if len(calls) == 2:
+            raise tk.Unavailable("Sign in to confirm your age")
+        return doc(title=url[-1])
+
+    monkeypatch.setattr(tk, "transcript", flaky)
+    monkeypatch.setattr(tk.time, "sleep", lambda s: None)
+    tk.main([f"https://youtu.be/vid123456{i:02d}" for i in range(4)] + ["-o", str(tmp_path)])
+    assert len(calls) == 4  # carried on
+    assert "not fetched" not in capsys.readouterr().err  # did not report giving up
 
 
 @pytest.mark.parametrize("msg", [
