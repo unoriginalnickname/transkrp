@@ -292,6 +292,58 @@ def test_an_empty_attribution_is_not_a_crash():
 
 
 # --------------------------------------------------------------------------
+# the corpus: identity that survives across episodes
+# --------------------------------------------------------------------------
+
+def test_a_corpus_name_grounds_a_later_mention():
+    """The reason this exists. Episode 3 introduces a guest properly; episode 12
+    only mentions them in passing, mangled by ASR, with nothing in its own
+    description. Per-video knowledge leaves them ungrounded there — flagged,
+    demoted, and unjoinable to their own earlier appearance.
+    """
+    later = video(title="A Different Episode", description="No guests listed.")
+    corpus = {ont._fold("Tom O'Neill"): "Tom O'Neill"}
+
+    alone, _ = ont.check(later, labels("tom o'neil"))
+    with_corpus, violations = ont.check(later, labels("tom o'neil"), corpus)
+
+    assert alone["labels"][0]["confidence"] == "low"        # unrecognised
+    assert with_corpus["labels"][0]["speaker"] == "Tom O'Neill"
+    assert not any(v.kind == "ungrounded_speaker" for v in violations)
+
+
+def test_the_videos_own_metadata_outranks_the_corpus():
+    """For the video it describes, the description is the better authority."""
+    t = video(description="Our guest is Daniel Peter Sheehan.")
+    corpus = {ont._fold("Daniel Peter Sheehan"): "D. P. Sheehan"}
+    assert ont.known_people(t, corpus)[ont._fold("Daniel Peter Sheehan")] == \
+        "Daniel Peter Sheehan"
+
+
+def test_only_grounded_speakers_join_the_corpus():
+    """An ungrounded name must not spread. Propagating one would make it
+    self-confirming — the flag marking it doubtful vanishes at the exact moment
+    it starts doing damage."""
+    result = {"labels": [{"speaker": "Frank Coyle", "confidence": "high"},
+                         {"speaker": "Invented Person", "confidence": "high"}]}
+    carried = ont.confirmed(video(), result)
+    assert "Frank Coyle" in carried.values()
+    assert "Invented Person" not in carried.values()
+
+
+def test_the_corpus_carries_the_canonical_spelling():
+    t = video(description="Our guest is Tom O'Neill.")
+    carried = ont.confirmed(t, labels("tom o'neil"))
+    assert list(carried.values()) == ["Tom O'Neill"]
+
+
+def test_an_empty_corpus_changes_nothing():
+    plain, _ = ont.check(video(), labels("Frank Coyle"))
+    with_empty, _ = ont.check(video(), labels("Frank Coyle"), {})
+    assert plain["speakers"] == with_empty["speakers"]
+
+
+# --------------------------------------------------------------------------
 # what goes back to the model, and to the user
 # --------------------------------------------------------------------------
 

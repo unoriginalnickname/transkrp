@@ -963,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Set once if the claude CLI turns out to be missing, so a 40-video run
     # says so once instead of forty times.
-    speaker_state = {"off": False}
+    speaker_state = {"off": False, "people": _load_people(out_dir)}
     docs, failed, skipped, done, fetched = [], 0, 0, 0, False
     for url in urls:
         if args.skip_existing and not args.force and not to_stdout:
@@ -1025,6 +1025,8 @@ def main(argv: list[str] | None = None) -> int:
               f"{' [machine-translated]' if t['translated'] else ''}"
               f"\n  wrote {out} ({n} {unit})", file=sys.stderr)
 
+    if args.speakers:
+        _save_people(out_dir, speaker_state["people"])
     if to_stdout and docs:
         print(_stdout_doc(docs, fmt == "json"))
     if len(urls) > 1:
@@ -1035,6 +1037,39 @@ def main(argv: list[str] | None = None) -> int:
             parts.append(f"{failed} failed")
         print(f"{', '.join(parts)} of {len(urls)}", file=sys.stderr)
     return 1 if failed else 0
+
+
+# Where a directory of transcripts remembers who it has already met. A dotfile
+# beside the output, so moving the corpus moves its identities with it.
+PEOPLE_FILE = ".transkrp-people.json"
+
+
+def _load_people(out_dir: str | None) -> dict[str, str]:
+    """Everyone previous runs over this directory confirmed.
+
+    A corrupt or unreadable file is treated as an empty one: this is a cache
+    that improves attribution, not a record anything depends on, and failing a
+    fetch over it would be absurd.
+    """
+    if not out_dir:
+        return {}
+    try:
+        with open(os.path.join(out_dir, PEOPLE_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if isinstance(v, str)}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _save_people(out_dir: str | None, people: dict[str, str]) -> None:
+    if not out_dir or not people:
+        return
+    try:
+        with open(os.path.join(out_dir, PEOPLE_FILE), "w", encoding="utf-8",
+                  newline="\n") as f:
+            json.dump(people, f, indent=2, ensure_ascii=False, sort_keys=True)
+    except OSError:
+        pass  # the transcripts are what matter; the cache is a convenience
 
 
 def _attribute(t: dict, args, state: dict) -> None:
@@ -1050,7 +1085,7 @@ def _attribute(t: dict, args, state: dict) -> None:
     if state["off"]:
         return
     try:
-        result = speakers.attribute(t, args.model)
+        result = speakers.attribute(t, args.model, corpus=state["people"])
     except speakers.NotAvailable as e:
         # Missing CLI fails identically for every video; say it once.
         print(f"  speakers: {e}", file=sys.stderr)
@@ -1061,8 +1096,17 @@ def _attribute(t: dict, args, state: dict) -> None:
         return
 
     speakers.apply(t, result)
+    # Only people this video's own metadata vouched for are carried forward.
+    # Propagating an ungrounded name would make it self-confirming: the flag
+    # that marks it doubtful disappears the moment it starts doing damage.
+    import ontology
+    before = len(state["people"])
+    state["people"].update(ontology.confirmed(t, result, state["people"]))
+    learned = len(state["people"]) - before
+
     unattributed = result["unattributed"]
     print(f"  speakers: {', '.join(result['speakers']) or 'none identified'}"
+          f"{f' (+{learned} new to this corpus)' if learned else ''}"
           f" ({result['attributed']} of {len(t['paragraphs'])} paragraphs"
           f"{f', {unattributed} unattributed' if unattributed else ''})",
           file=sys.stderr)

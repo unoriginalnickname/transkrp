@@ -1,6 +1,6 @@
 # 0012. Validate the model's answer against a domain model
 
-- Status: Accepted
+- Status: Accepted (extended 2026-07-27 — see the end)
 - Date: 2026-07-27
 
 ## Context
@@ -81,3 +81,37 @@ deciding whether to trust an attribution can see that the domain model objected.
 - **This applies to `--speakers` and nothing else.** The rest of the tool is
   deterministic and has no probabilistic step to guard. Do not generalise the
   pattern to code that doesn't need it.
+
+
+## Extension, 2026-07-27: the domain model spans the corpus
+
+As first built, `known_people` was assembled from **one video**. That is wrong
+for the thing this is for. A guest is introduced properly in episode 3 — named
+in the description, spelled by a human — and then merely *mentioned* in episode
+12, where the description says nothing and the transcript has only what speech
+recognition heard. Per-video knowledge leaves them ungrounded there: flagged,
+demoted to low confidence, and unjoinable to their own earlier appearance.
+
+So the check now takes an optional corpus of people already confirmed, and a
+directory of transcripts remembers them in a `.transkrp-people.json` beside the
+output. A name established anywhere resolves everywhere.
+
+Two rules keep it from going wrong:
+
+- **Only grounded speakers are carried forward.** An ungrounded name must not
+  spread — propagating one would make it self-confirming, and the flag marking
+  it doubtful would disappear at the exact moment it began doing damage.
+- **The video's own metadata outranks the corpus** for the video it describes.
+  A description is the better authority on its own episode.
+
+The corpus is also shown to the model, which is the cheaper half of the benefit:
+having seen a name spelled properly, it is far likelier to return that spelling
+than to invent a third variant of what the ASR heard. Capped at 40 names so a
+long-running corpus cannot crowd out the transcript.
+
+Verified across two episodes of one channel: the first contributed Jesse Michels
+and Tom O'Neill, the second added nobody because it recognised the host it had
+already met rather than learning him again.
+
+The file is a cache, not a record. A corrupt or unreadable one is treated as
+empty — attribution gets slightly worse, and nothing else happens.

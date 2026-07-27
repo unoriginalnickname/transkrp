@@ -158,6 +158,44 @@ def test_the_channel_is_offered_as_the_host(replies):
     assert "Jesse Michels" in seen[0]["prompt"]
 
 
+def test_corpus_names_are_offered_to_the_model(replies):
+    """Seeing a name spelled properly makes the model far likelier to return it
+    that way, rather than inventing a third variant of what ASR heard."""
+    seen = replies({"speakers": [], "labels": []})
+    speakers.attribute(interview(), corpus={"tom oneill": "Tom O'Neill"})
+    assert "Tom O'Neill" in seen[0]["prompt"]
+
+
+def test_a_huge_corpus_does_not_crowd_out_the_transcript(replies):
+    seen = replies({"speakers": [], "labels": []})
+    big = {f"person{i}": f"Person Number{i}" for i in range(500)}
+    speakers.attribute(interview(1), corpus=big)
+    assert len(seen[0]["prompt"]) < 8000
+
+
+# --------------------------------------------------------------------------
+# the people file: identity that survives between runs
+# --------------------------------------------------------------------------
+
+def test_people_round_trip(tmp_path):
+    tk._save_people(str(tmp_path), {"tom oneill": "Tom O'Neill"})
+    assert tk._load_people(str(tmp_path)) == {"tom oneill": "Tom O'Neill"}
+
+
+@pytest.mark.parametrize("content", ["not json", "[1,2,3]", '{"a": 5}', ""])
+def test_a_damaged_people_file_is_treated_as_empty(tmp_path, content):
+    """It's a cache that improves attribution, not a record anything depends on.
+    Failing a fetch over it would be absurd."""
+    (tmp_path / tk.PEOPLE_FILE).write_text(content, encoding="utf-8")
+    assert tk._load_people(str(tmp_path)) == {}
+
+
+def test_no_output_directory_means_no_people_file(tmp_path):
+    assert tk._load_people(None) == {}
+    tk._save_people(None, {"a": "A"})          # must not raise
+    assert not list(tmp_path.iterdir())
+
+
 def test_the_sponsor_tail_is_trimmed(replies):
     """Descriptions run to thousands of characters of links; the guest is named
     at the top and the rest is prompt nobody is buying anything with."""

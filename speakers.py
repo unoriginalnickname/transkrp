@@ -125,8 +125,14 @@ def _parse(reply: str) -> dict:
     return got if isinstance(got, dict) else {}
 
 
-def _context(t: dict) -> str:
-    """What the video says about itself. The description earns its place here."""
+def _context(t: dict, corpus: dict[str, str] | None = None) -> str:
+    """What the video says about itself, plus who the corpus already knows.
+
+    Naming prior speakers matters across a series: episode 12 may mention a
+    guest from episode 3 only in passing, and only as speech recognition heard
+    them. Having seen the name spelled properly, the model has a far better
+    chance of returning it that way rather than inventing a third variant.
+    """
     lines = [f"Title: {t.get('title', '')}",
              f"Channel (the host): {t.get('channel') or 'unknown'}"]
     if t.get("upload_date"):
@@ -134,12 +140,18 @@ def _context(t: dict) -> str:
     if desc := (t.get("description") or "").strip():
         # Enough to carry the guest's introduction, not the whole sponsor tail.
         lines.append(f"Description:\n{desc[:1500]}")
+    if corpus:
+        # Capped: a corpus of hundreds should not crowd out the transcript.
+        seen = sorted(set(corpus.values()))[:40]
+        lines.append("People already identified elsewhere in this corpus "
+                     "(use these spellings if they speak here): " + ", ".join(seen))
     return "\n".join(lines)
 
 
 def attribute(t: dict, model: str | None = None,
               per_request: int = PARAGRAPHS_PER_REQUEST,
-              progress=None, retry: bool = True) -> dict:
+              progress=None, retry: bool = True,
+              corpus: dict[str, str] | None = None) -> dict:
     """Attribute one transcript's paragraphs to named speakers.
 
     Returns {"speakers": [names], "labels": [{speaker, confidence} | None, ...]},
@@ -148,7 +160,7 @@ def attribute(t: dict, model: str | None = None,
     never land on a neighbour.
     """
     paras = t.get("paragraphs") or []
-    context = _context(t)
+    context = _context(t, corpus)
     labels: list[dict | None] = [None] * len(paras)
     names: list[str] = []
 
@@ -180,10 +192,11 @@ def attribute(t: dict, model: str | None = None,
               "model": model or "claude (cli default)",
               "attributed": sum(1 for x in labels if x and x.get("speaker")),
               "unattributed": sum(1 for x in labels if not (x and x.get("speaker")))}
-    return validated(t, result, model, retry=retry)
+    return validated(t, result, model, retry=retry, corpus=corpus)
 
 
-def validated(t: dict, result: dict, model: str | None, retry: bool = True) -> dict:
+def validated(t: dict, result: dict, model: str | None, retry: bool = True,
+              corpus: dict[str, str] | None = None) -> dict:
     """Run the answer past the domain model before anyone sees it.
 
     This is the ledger check, and the loop Coyle describes: an unreasonable
@@ -191,18 +204,18 @@ def validated(t: dict, result: dict, model: str | None, retry: bool = True) -> d
     loop on purpose — his own warning is that loops drift and cost money, and a
     second disagreement is a signal to stop and report, not to keep asking.
     """
-    corrected, violations = ontology.check(t, result)
+    corrected, violations = ontology.check(t, result, corpus)
     if not violations or not retry:
         corrected["violations"] = [v.detail for v in violations]
         return corrected
 
-    known = ontology.known_people(t)
+    known = ontology.known_people(t, corpus)
     hint = ontology.retry_hint(violations, known)
     paras = t.get("paragraphs") or []
     numbered = "\n\n".join(f"[{i}] {p['text']}" for i, p in enumerate(paras, 1))
     try:
         second = _parse(_run(
-            f"{PROMPT}\n\n{_context(t)}\n\n{hint}\n\n"
+            f"{PROMPT}\n\n{_context(t, corpus)}\n\n{hint}\n\n"
             f"--- transcript ---\n\n{numbered}", model))
     except LookupError:
         second = {}
@@ -220,7 +233,7 @@ def validated(t: dict, result: dict, model: str | None, retry: bool = True) -> d
             retried["labels"][n - 1] = {"speaker": entry.get("speaker"),
                                         "confidence": entry.get("confidence") or "low"}
 
-    second_pass, still = ontology.check(t, retried)
+    second_pass, still = ontology.check(t, retried, corpus)
     # Keep whichever answer the domain model likes better. A retry that breaks
     # more constraints than the original is not an improvement.
     if len(still) < len(violations):
