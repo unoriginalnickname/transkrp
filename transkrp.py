@@ -587,6 +587,13 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
         # is a quote with the attribution torn off.
         "channel": info.get("uploader") or info.get("channel") or "",
         "upload_date": _date(info.get("upload_date")),
+        # The description is where the guest is named, spelled correctly, by a
+        # human. That matters more than it sounds: ASR mangles exactly the words
+        # a cross-referencing corpus needs most — this video's description opens
+        # "Daniel Peter Sheehan is a Harvard trained constitutional..." while the
+        # transcript says "Danny shean". Kept whole in JSON; the first sentence
+        # goes in the markdown frontmatter, which is the part naming the guest.
+        "description": (info.get("description") or "").strip(),
         # The creator's own section titles, which YouTube has and we were
         # throwing away. Verbatim structure for free: a 33,000-word interview
         # has 19 of these, and without them it is one undifferentiated wall.
@@ -625,6 +632,18 @@ def _date(yyyymmdd: str | None) -> str:
     return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
 
 
+def _first_sentence(text: str, limit: int = 220) -> str:
+    """The opening sentence of a description, flattened to one line.
+
+    Descriptions run to thousands of characters of links and sponsor copy, but
+    the first sentence is reliably who this is: "Our incredible guest today is
+    Nick Cook." That belongs in the frontmatter; the rest belongs in the JSON.
+    """
+    first = re.split(r"(?<=[.!?])\s|\n", text.strip(), maxsplit=1)[0]
+    first = re.sub(r"\s+", " ", first).strip()
+    return first[:limit].rstrip() + "..." if len(first) > limit else first
+
+
 def _chapters(info: dict) -> list[dict]:
     """The creator's section titles, as [{start_ms, timestamp, title}].
 
@@ -658,12 +677,19 @@ def to_markdown(t: dict) -> str:
         head.append(f"channel: {t['channel']}")
     if t.get("upload_date"):
         head.append(f"published: {t['upload_date']}")
+    if about := _first_sentence(t.get("description", "")):
+        head.append(f"about: {about}")
     head += [f"url: {t['url']}",
              f"source: {t['source']}", f"lang: {t['lang']}",
              f"punctuated: {str(t['punctuated']).lower()}"]
     if t["translated"]:
         head.append("translated: true  # machine translation of machine transcription")
-    if t["turns"] > 1:
+    if t.get("speakers"):
+        head.append(f"speakers: {', '.join(t['speakers'])}")
+        head.append(f"speakers_inferred_by: {t.get('speakers_by', '')}  "
+                    f"# attribution is generated, not from the captions; "
+                    f"'?' marks low confidence")
+    elif t["turns"] > 1:
         head.append(f"turns: {t['turns']}  # speaker changes; who is speaking is not marked")
     if not t["punctuated"]:
         head.append("note: unpunctuated speech recognition - no sentence breaks or speaker labels")
@@ -677,12 +703,24 @@ def to_markdown(t: dict) -> str:
     # this is structure the document already had and was discarding — a
     # 33,000-word interview reads as one wall without them.
     pending = list(t.get("chapters") or [])
-    lines, prev_turn = [], None
+    lines, prev_turn, prev_speaker = [], None, None
     for p in t["paragraphs"]:
         while pending and pending[0]["start_ms"] <= p["start_ms"]:
             lines.append(f"## {pending.pop(0)['title']}")
-        new_turn = prev_turn is not None and p["turn"] != prev_turn
-        marker = ">> " if new_turn else ""
+        # A name beats the anonymous ">>": it's the whole point of --speakers,
+        # and it's what makes a paragraph cross-referenceable to a person. The
+        # "?" marks a low-confidence guess rather than hiding it — an inferred
+        # attribution presented as certain is the failure mode worth avoiding.
+        if speaker := p.get("speaker"):
+            if speaker != prev_speaker:
+                marker = f"**{speaker}"
+                marker += "?**: " if p.get("speaker_confidence") == "low" else "**: "
+            else:
+                marker = ""
+            prev_speaker = speaker
+        else:
+            new_turn = prev_turn is not None and p["turn"] != prev_turn
+            marker = ">> " if new_turn else ""
         # The timestamp links into the video at that second. The whole point of
         # anchoring every paragraph is that a load-bearing claim can be checked
         # against the audio, and that is a different proposition when it is one
@@ -838,6 +876,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="don't refetch videos already written to the output "
                          "directory; use this to resume an interrupted run")
+    ap.add_argument("--speakers", action="store_true",
+                    help="work out who said what, by name, via the Claude API "
+                         "(costs money; prints an estimate first)")
+    ap.add_argument("--model", default=None, metavar="ID",
+                    help="model for --speakers (default claude-opus-5)")
+    ap.add_argument("--yes", "-y", action="store_true",
+                    help="skip the cost confirmation for --speakers")
     ap.add_argument("--playlist", action="store_true",
                     help="for a URL that names a video inside a playlist, take "
                          "the whole playlist rather than just that video")
@@ -903,6 +948,8 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 1
 
+    # One confirmation and one running total for the whole run, not per video.
+    spent = {"asked": False, "declined": False, "usd": 0.0}
     docs, failed, skipped, done, fetched = [], 0, 0, 0, False
     for url in urls:
         if args.skip_existing and not args.force and not to_stdout:
@@ -938,6 +985,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         done += 1
 
+        if args.speakers:
+            _attribute(t, args, spent)
+
         if to_stdout:
             # Keep JSON as objects: several documents concatenated are not JSON,
             # so they have to be assembled into one array at the end.
@@ -970,7 +1020,62 @@ def main(argv: list[str] | None = None) -> int:
         if failed:
             parts.append(f"{failed} failed")
         print(f"{', '.join(parts)} of {len(urls)}", file=sys.stderr)
+    if spent["usd"]:
+        print(f"speaker attribution cost roughly ${spent['usd']:.2f}", file=sys.stderr)
     return 1 if failed else 0
+
+
+def _attribute(t: dict, args, spent: dict) -> None:
+    """Add speaker labels, announcing the cost before the first one is spent.
+
+    A tool that quietly bills an API account is a tool people stop trusting, so
+    the estimate is printed and — unless --yes — confirmed. Confirmation happens
+    once per run, not once per video: a 40-video playlist shouldn't ask 40 times.
+    """
+    import speakers
+
+    n_words = len(t.get("text", "").split())
+    cost = speakers.estimate_usd(n_words, args.model or speakers.DEFAULT_MODEL)
+    if not spent["asked"]:
+        spent["asked"] = True
+        shown = f"~${cost:.2f} for this video" if cost else "an unknown amount"
+        print(f"--speakers calls the Claude API and costs money ({shown}"
+              f"{', more for the rest of the run' if not args.yes else ''}).",
+              file=sys.stderr)
+        if not args.yes and not _confirm():
+            spent["declined"] = True
+    if spent["declined"]:
+        return
+
+    try:
+        result = speakers.attribute(t, args.model or speakers.DEFAULT_MODEL)
+    except speakers.NotAvailable as e:
+        print(f"  speakers: {e}", file=sys.stderr)
+        spent["declined"] = True  # it will fail the same way for every video
+        return
+    except LookupError as e:
+        print(f"  speakers: {e}", file=sys.stderr)
+        return
+
+    speakers.apply(t, result)
+    if cost:
+        spent["usd"] += cost
+    print(f"  speakers: {', '.join(result['speakers']) or 'none identified'}"
+          f" ({result['attributed']} of {len(t['paragraphs'])} paragraphs"
+          f"{f', {result['unattributed']} unattributed' if result['unattributed'] else ''})",
+          file=sys.stderr)
+
+
+def _confirm() -> bool:
+    """Ask once. A non-tty (piped, cron) declines rather than blocking forever."""
+    if not sys.stdin or not sys.stdin.isatty():
+        print("  not a terminal - skipping speaker attribution. Pass --yes to run it.",
+              file=sys.stderr)
+        return False
+    try:
+        return input("  proceed? [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
 
 
 def _stdout_doc(docs: list, as_json: bool) -> str:
