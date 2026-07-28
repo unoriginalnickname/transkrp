@@ -48,7 +48,11 @@ Source = "https://github.com/unoriginalnickname/transkrp"
 Issues = "https://github.com/unoriginalnickname/transkrp/issues"
 
 [tool.setuptools]
-py-modules = ["transkrp"]
+# `sponsors` ships with the core: stdlib only, and transkrp imports it at module
+# level. `speakers`, `ontology` and `graph` are deliberately absent — they need
+# the [speakers] extras and are imported lazily, inside the functions that use
+# them, so an install without the extras still runs.
+py-modules = ["transkrp", "sponsors"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
