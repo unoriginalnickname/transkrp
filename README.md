@@ -28,6 +28,7 @@ Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
 --proxy URL      route both requests through a proxy
 --cookies WHAT   browser name or cookies.txt, for age-restricted videos
 --skip-existing  don't refetch what's already in the output directory
+--strip-sponsors drop sponsor reads (SponsorBlock timings); cut spans are recorded
 --force          refetch anyway, when captions have been corrected
 --version
 ```
@@ -105,6 +106,32 @@ YouTube's ASR mostly doesn't emit it. Measured on a 30-episode interview
 playlist: **`turns: 1` on all 30** — two people talking, no marker anywhere. A
 televised congressional hearing, by contrast, carried 474. For podcasts, assume
 no speaker structure — or use `--speakers`.
+
+## Sponsor reads (`--strip-sponsors`)
+
+Every episode of a series opens with the same "thanks to our sponsor, discount
+code" read. Thirty near-identical passages is worse than mild noise in a corpus
+you search: repetition is what makes a passage look salient, so the one thing the
+episodes are *not* about gets boosted for being frequent.
+
+`--strip-sponsors` drops those cues, using [SponsorBlock](https://sponsor.ajay.app/)'s
+crowd-sourced timings, and **records what it removed**:
+
+```yaml
+sponsors_removed: 33:41-35:24  # cut from the transcript, timings from SponsorBlock
+```
+
+Off by default, because a document called a transcript should contain what was
+said unless you asked otherwise — and because the crowd's timings are only as
+good as the crowd. On the first real video tried, the segment began inside a
+paragraph that opens as the video's conclusion and turns into the ad two
+sentences later, so the cut took those two sentences with it. The frontmatter is
+how you find out. [ADR 0014](docs/adr/0014-strip-sponsor-reads-on-request-and-say-so.md).
+
+Nothing here can fail a fetch: no submissions, a timeout, or the service being
+down all mean "no segments", and the transcript comes out intact. The video ID is
+never sent — the query goes to the endpoint keyed by the first four characters of
+its hash, which answers for every video sharing them.
 
 ## Who said what (`--speakers`)
 

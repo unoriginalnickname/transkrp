@@ -995,7 +995,7 @@ def test_cli_keeps_going_after_one_video_fails(monkeypatch, tmp_path, capsys):
     """A private video in the middle of a playlist must not lose the other 199."""
     calls = []
 
-    def flaky(url, lang=None, proxy=None, target=tk.TARGET_WORDS, cookies=None, segments_too=False):
+    def flaky(url, lang=None, proxy=None, target=tk.TARGET_WORDS, cookies=None, **kw):
         calls.append(url)
         if url == "http://bad":
             raise LookupError("video unavailable")
@@ -1470,7 +1470,7 @@ def test_cookies_reach_the_playlist_expansion(monkeypatch):
 def test_cli_passes_cookies_through(monkeypatch, tmp_path):
     got = {}
 
-    def spy(url, lang=None, proxy=None, target=None, cookies=None, segments_too=False):
+    def spy(url, lang=None, proxy=None, target=None, cookies=None, **kw):
         got["cookies"] = cookies
         return doc()
 
@@ -1499,7 +1499,7 @@ def test_version_is_reported(capsys):
 def test_cli_passes_the_word_target_through(monkeypatch, tmp_path):
     got = {}
 
-    def spy(url, lang=None, proxy=None, target=None, cookies=None, segments_too=False):
+    def spy(url, lang=None, proxy=None, target=None, cookies=None, **kw):
         got["target"], got["proxy"] = target, proxy
         return doc()
 
