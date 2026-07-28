@@ -28,6 +28,8 @@ import urllib.request
 
 import yt_dlp
 
+import sponsors
+
 GAP_BREAK_MS = 2000  # a silence this long reads as a topic break, not a breath
 TARGET_WORDS = 110
 MIN_WORDS = 25  # don't let a pause strand a two-word paragraph
@@ -557,7 +559,7 @@ def paragraphs(segs: list[tuple[int, int, str]], punctuated: bool | None = None,
 
 def transcript(url: str, lang: str | None = None, proxy: str | None = None,
                target: int = TARGET_WORDS, cookies: str | None = None,
-               segments_too: bool = False) -> dict:
+               segments_too: bool = False, strip_sponsors: bool = False) -> dict:
     """Fetch a transcript. The one call another system needs.
 
     Returns a JSON-safe dict:
@@ -574,6 +576,13 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
     segs = segments(info, source, key, proxy=proxy)
     if not segs:
         raise NoCaptions(f"caption track {key!r} was empty")
+    # Before segmentation, so paragraphs are built from what survives and none
+    # of them straddle a gap. Opt-in, and the gaps are declared in the output —
+    # ADR 0014.
+    cut: list[tuple[int, int]] = []
+    if strip_sponsors:
+        segs, cut = sponsors.strip(
+            segs, sponsors.fetch(info.get("id", ""), proxy=proxy))
     # "auto" does not mean "raw": YouTube's newer ASR emits punctuation and >>
     # speaker markers, while some manual tracks are unedited dumps that don't.
     # Detect it; don't infer it from the track's source.
@@ -618,6 +627,10 @@ def transcript(url: str, lang: str | None = None, proxy: str | None = None,
             for ms, turn, text in paras
         ],
         "text": " ".join(text for _, _, text in paras),
+        # What was cut travels with the document. Only present when something
+        # actually was: absent means nothing removed, not "not asked for".
+        **({"sponsors_removed": [{"start_ms": s, "end_ms": e} for s, e in cut]}
+           if cut else {}),
         # Off by default: a long video has thousands of cues, which would treble
         # the size of a JSON dump that most callers only want paragraphs from.
         **({"segments": [{"start_ms": s, "end_ms": e, "text": txt}
@@ -708,6 +721,12 @@ def to_markdown(t: dict) -> str:
         head.append(f"turns: {t['turns']}  # speaker changes; who is speaking is not marked")
     if not t["punctuated"]:
         head.append("note: unpunctuated speech recognition - no sentence breaks or speaker labels")
+    # A document missing content says where. A reader who finds a jump at 01:48
+    # can see why it is there and refetch without the flag.
+    for i, span in enumerate(t.get("sponsors_removed") or []):
+        note = "  # cut from the transcript, timings from SponsorBlock" if not i else ""
+        head.append(
+            f"sponsors_removed: {stamp(span['start_ms'])}-{stamp(span['end_ms'])}{note}")
     head.append("---")
 
     # Mark a speaker change with ">>" — the standard transcript convention, and
@@ -891,6 +910,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="don't refetch videos already written to the output "
                          "directory; use this to resume an interrupted run")
+    ap.add_argument("--strip-sponsors", action="store_true",
+                    help="drop sponsor reads, using SponsorBlock's crowd-sourced "
+                         "timings; the cut spans are recorded in the output")
     ap.add_argument("--speakers", action="store_true",
                     help="work out who said what, by name, using the `claude` "
                          "CLI (no API key; slow)")
@@ -983,7 +1005,8 @@ def main(argv: list[str] | None = None) -> int:
         fetched = True
         try:
             t = transcript(url, args.lang, args.proxy, args.words, args.cookies,
-                           segments_too=fmt in ("srt", "vtt"))
+                           segments_too=fmt in ("srt", "vtt"),
+                           strip_sponsors=args.strip_sponsors)
         except RateLimited as e:
             # Every remaining video will fail the same way, and asking makes the
             # block worse. Stop and say how to pick up where this left off.

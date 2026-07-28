@@ -2,20 +2,11 @@
 
 ## Worth doing
 
-- [ ] **Strip sponsor reads.** Found by dogfooding a 30-episode interview
-  playlist: every transcript opens with "huge thank you to our sponsor…
-  discount code…". For a searchable knowledge base that is pure noise, and it
-  is noise that recurs identically across every episode of a series, which is
-  exactly the shape that poisons retrieval. SponsorBlock has crowd-sourced
-  segment timings and yt-dlp already speaks to it (`--sponsorblock-mark`); the
-  work here is dropping cues whose timings fall in a sponsor segment, plus a
-  flag to control it. Would need its own ADR: a second network dependency, and
-  a decision about whether removing content silently is acceptable in a
-  document that claims to be a transcript.
+Nothing open.
 
 ---
 
-Everything else has been built, or checked and declined with the reason
+Everything has been built, or checked and declined with the reason
 recorded. Kept as a record so the declined items don't get re-derived.
 
 Decisions that *have* been made live in [docs/adr/](docs/adr/README.md), and the
@@ -67,6 +58,16 @@ is a bad way to exist.
   [ADR 0010](docs/adr/0010-ci-runs-offline-only.md).
 
 ## Done since this list was written
+
+**Sponsor reads** are stripped by `--strip-sponsors`, opt-in, with the removed
+spans declared in the frontmatter
+([ADR 0014](docs/adr/0014-strip-sponsor-reads-on-request-and-say-so.md)). The
+open question in the original entry — whether removing content silently is
+acceptable in a document that claims to be a transcript — was answered "no", in
+both directions: the flag is off by default, and when it does cut, the document
+says where.
+
+Earlier:
 
 Non-English fallback, `--lang auto`, `--cookies` for age-restricted videos,
 `--force`, `--version`, a single source of truth for the dependency pin, live
