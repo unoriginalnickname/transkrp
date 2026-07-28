@@ -83,6 +83,33 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
+def quote_supports(evidence: str, source: str, target: str) -> bool:
+    """Does the quote actually mention one of the people it is evidence about?
+
+    `quote_is_real` proves a citation is genuine. It does not prove the citation
+    is *relevant*, and the difference is not academic: a real transcript produced
+    `Ali Howard --interviewed--> Dex Horthy` cited by "And we've got Dax Raad,
+    who you all know, CEO of Human Layer" — a true sentence about a third person,
+    attached to a claim it says nothing about. It passed provenance and was
+    nonsense.
+
+    Requiring at least one endpoint to be named is deliberately weak: the other
+    party is often a pronoun ("Dex covered this well in his talk"), so demanding
+    both would reject sound edges. Weak, but it catches a quote that is about
+    somebody else entirely.
+    """
+    words = set(_words(evidence))
+    for name in (source, target):
+        parts = _words(ontology.tidy_name(name))
+        # Any name-word is enough: transcripts say "Dex", "Horthy", "Dex Horty".
+        if any(p in words for p in parts if len(p) > 2):
+            return True
+        # And the ASR may have misheard it — "Horty" for "Horthy".
+        if any(ontology._close(p, w) for p in parts if len(p) > 3 for w in words):
+            return True
+    return False
+
+
 def quote_is_real(evidence: str, transcript_text: str) -> bool:
     """Does this quote actually occur in the transcript?
 
@@ -138,6 +165,19 @@ def load(directory: str) -> list[dict]:
     return out
 
 
+def _is_the_channel(name: str, t: dict) -> bool:
+    """Is this the uploading channel rather than a person?
+
+    On an interview channel the host is a person and belongs in the graph; on a
+    conference channel the same field is an organisation. Telling them apart
+    automatically is not reliable, so the graph declines to guess and leaves the
+    channel out — a missing node for a host is a smaller error than a false hub
+    that every talk connects to.
+    """
+    channel = (t.get("channel") or "").strip()
+    return bool(channel) and ontology._fold(name) == ontology._fold(channel)
+
+
 def _stamp_url(t: dict, stamp: str) -> str:
     """The video at that second — reusing the link the transcript already has."""
     for p in t["paragraphs"]:
@@ -160,18 +200,27 @@ def extract(t: dict, model: str | None = None,
     try:
         answer = speakers._parse(speakers._run(
             f"{PROMPT}\n\n{context}\n\n--- transcript ---\n\n{numbered}", model))
-    except LookupError:
-        return {"people": [], "edges": [], "rejected": 0}
+    except LookupError as e:
+        # Marked failed, not empty. A swallowed error and a talk with nobody in
+        # it produce the same empty result, and on a real 40-video run ten
+        # consecutive transient failures were reported as ten findings of "no
+        # people". A degraded run must not look like a completed one.
+        return {"people": [], "edges": [], "rejected": 0, "failed": str(e),
+                "video": t.get("title", ""),
+                "video_id": transkrp.video_id(t.get("url", "")) or t.get("path", "")}
 
     known = ontology.known_people(t, corpus)
-    people, edges, rejected = [], [], 0
+    people, edges, rejected, irrelevant = [], [], 0, 0
 
     for person in answer.get("people") or []:
         name = (person or {}).get("name")
         if not name:
             continue
         canonical, _ = ontology.canonicalise(ontology.tidy_name(name), known)
-        if not canonical:
+        if not canonical or _is_the_channel(canonical, t):
+            # A conference channel is an entity but not a human, and left in it
+            # became the graph's biggest hub: 14 of 107 edges hung off "AI
+            # Engineer", asserting it had *interviewed* its own speakers.
             continue
         people.append({"name": canonical, "role": (person.get("role") or "").strip(),
                        # A bare given name identifies someone inside this
@@ -188,12 +237,20 @@ def extract(t: dict, model: str | None = None,
         if not quote_is_real(evidence, t["text"]):
             rejected += 1
             continue
+        if not quote_supports(evidence, edge["from"], edge["to"]):
+            # Genuine quote, wrong claim. Counted separately so the two kinds of
+            # failure stay legible: one is a model inventing a citation, the
+            # other is a model attaching a real one to the wrong pair.
+            irrelevant += 1
+            continue
         source, _ = ontology.canonicalise(ontology.tidy_name(edge["from"]), known)
         target, _ = ontology.canonicalise(ontology.tidy_name(edge["to"]), known)
         if not source or not target:
             continue
         if ontology._fold(source) == ontology._fold(target):
             continue                      # a self-edge says nothing
+        if _is_the_channel(source, t) or _is_the_channel(target, t):
+            continue
         stamp = str(edge.get("timestamp") or "")
         edges.append({
             "from": source, "to": target, "kind": kind,
@@ -203,7 +260,16 @@ def extract(t: dict, model: str | None = None,
             "confidence": edge.get("confidence") or "low",
         })
 
+    # A talk whose own frontmatter names a speaker cannot truthfully contain no
+    # people. Empty here means the model returned nothing usable, which is a
+    # failure wearing a result's clothes.
+    failed = None
+    if not people and t.get("speakers"):
+        failed = "returned no people, though the transcript names a speaker"
+
     return {"people": people, "edges": edges, "rejected": rejected,
+            "irrelevant": irrelevant,
+            **({"failed": failed} if failed else {}),
             "video": t.get("title", ""),
             "video_id": transkrp.video_id(t.get("url", "")) or t.get("path", "")}
 
@@ -239,10 +305,16 @@ def merge(results: list[dict]) -> dict:
                 node["videos"] += 1
         edges += result.get("edges") or []
 
+    failures = [{"video": r.get("video", ""), "why": r["failed"]}
+                for r in results if r.get("failed")]
     return {
         "people": sorted(people.values(), key=lambda p: (-p["videos"], p["name"])),
         "edges": edges,
         "rejected": sum(r.get("rejected", 0) for r in results),
+        "irrelevant": sum(r.get("irrelevant", 0) for r in results),
+        # Surfaced rather than absorbed: a graph missing a quarter of its corpus
+        # should say so, not quietly be smaller.
+        "failed": failures,
     }
 
 

@@ -249,7 +249,101 @@ def test_rejections_are_totalled_across_the_corpus():
 
 
 def test_an_empty_corpus_is_not_a_crash():
-    assert graph.merge([]) == {"people": [], "edges": [], "rejected": 0}
+    assert graph.merge([]) == {"people": [], "edges": [], "rejected": 0,
+                               "irrelevant": 0, "failed": []}
+
+
+# --------------------------------------------------------------------------
+# a genuine quote attached to the wrong claim
+# --------------------------------------------------------------------------
+
+def test_a_quote_naming_neither_party_is_refused(answers, talk):
+    """The limitation quote_is_real does not cover, found in real output:
+    `Ali Howard --interviewed--> Dex Horthy` cited by a true sentence about
+    Dax Raad. Genuine provenance, irrelevant to the claim."""
+    answers({"people": [], "edges": [edge(
+        **{"from": "Ali Howard", "to": "Dex Horthy",
+           "evidence": "he also founded a company and we joined later on"})]})
+    got = graph.extract(talk)
+    assert got["edges"] == [] and got["irrelevant"] == 1
+    assert got["rejected"] == 0        # the quote was real; it just wasn't about them
+
+
+def test_a_quote_naming_one_party_is_enough(answers, talk):
+    """The other side is often a pronoun — "Dex covered this in his talk" —
+    so demanding both names would reject sound edges."""
+    answers({"people": [], "edges": [edge(evidence="my colleague Asbjorn currently work at")]})
+    assert len(graph.extract(talk)["edges"]) == 1
+
+
+def test_a_misheard_name_still_counts_as_named():
+    """Transcripts say "Dex Horty" for "Dex Horthy"; that is still a mention."""
+    assert graph.quote_supports("thanks to uh to Dex Horty", "Sam Bhagwat", "Dex Horthy")
+
+
+def test_the_two_kinds_of_bad_evidence_are_counted_apart():
+    """A model inventing citations and a model misfiling real ones are different
+    problems with different fixes, so they are not summed together."""
+    assert graph.quote_supports("nothing about anyone here", "A Person", "B Person") is False
+
+
+# --------------------------------------------------------------------------
+# the channel is an organisation, not a person
+# --------------------------------------------------------------------------
+
+def test_the_channel_does_not_become_a_person(answers, talk):
+    """Left in, it was the graph's biggest hub — 14 of 107 edges hung off "AI
+    Engineer", asserting a conference had *interviewed* its own speakers."""
+    talk["channel"] = "AI Engineer"
+    answers({"people": [{"name": "AI Engineer", "role": "conference"},
+                        {"name": "Anant Dole", "role": "speaker"}], "edges": []})
+    names = [p["name"] for p in graph.extract(talk)["people"]]
+    assert names == ["Anant Dole"]
+
+
+def test_edges_to_the_channel_are_dropped(answers, talk):
+    talk["channel"] = "AI Engineer"
+    answers({"people": [], "edges": [edge(**{"from": "AI Engineer"})]})
+    assert graph.extract(talk)["edges"] == []
+
+
+# --------------------------------------------------------------------------
+# a degraded run must not look like a completed one
+# --------------------------------------------------------------------------
+
+def test_a_cli_failure_is_marked_not_swallowed(answers, talk, monkeypatch):
+    """The bug this caught on a real 40-video run: ten consecutive transient
+    failures were reported as ten findings of "no people in this talk". An
+    error and an empty result are not the same thing and must not look alike.
+    """
+    monkeypatch.setattr(speakers, "_run",
+                        lambda *a, **k: (_ for _ in ()).throw(LookupError("claude exited 1")))
+    got = graph.extract(talk)
+    assert got["failed"]
+    assert got["people"] == []
+
+
+def test_no_people_in_a_talk_that_names_a_speaker_is_a_failure(answers, talk):
+    """A talk whose own frontmatter names a speaker cannot truthfully contain
+    nobody. Empty here is a failure wearing a result's clothes."""
+    answers({"people": [], "edges": []})
+    assert graph.extract(talk)["failed"]
+
+
+def test_no_people_in_a_talk_that_names_nobody_is_just_empty(answers, talk):
+    talk["speakers"] = []
+    answers({"people": [], "edges": []})
+    assert "failed" not in graph.extract(talk)
+
+
+def test_failures_are_surfaced_in_the_merged_graph():
+    """A graph missing a quarter of its corpus should say so, not quietly be
+    smaller."""
+    bad = result([], "v1")
+    bad["failed"] = "claude exited 1"
+    bad["video"] = "A Talk"
+    g = graph.merge([result(["A Person"], "v2"), bad])
+    assert g["failed"] == [{"video": "A Talk", "why": "claude exited 1"}]
 
 
 def test_the_graph_is_json_safe(tmp_path):
