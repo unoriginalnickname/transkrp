@@ -59,6 +59,13 @@ is a bad way to exist.
 
 ## Done since this list was written
 
+**Podcasts** are transcribed rather than refused: a show's name, an RSS feed or
+an Apple Podcasts link resolves through the iTunes directory to the episode
+audio, and `faster-whisper` produces the transcript when the feed publishes none
+([ADR 0015](docs/adr/0015-transcribe-podcasts-rather-than-refusing-them.md)).
+This had been done once by hand and lost; the committed code reproduces that
+transcript exactly — 77 of 77 paragraphs identical in timestamp and text.
+
 **Sponsor reads** are stripped by `--strip-sponsors`, opt-in, with the removed
 spans declared in the frontmatter
 ([ADR 0014](docs/adr/0014-strip-sponsor-reads-on-request-and-say-so.md)). The

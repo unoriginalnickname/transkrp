@@ -311,3 +311,78 @@ def test_an_unavailable_video_is_a_clean_error():
     with pytest.raises(LookupError) as caught:
         tk.probe("https://www.youtube.com/watch?v=00000000000")
     assert "unavailable" in str(caught.value).lower()
+
+
+# --- podcasts ---------------------------------------------------------------
+#
+# The same argument as above, for a different set of undocumented endpoints. The
+# iTunes directory has no contract with us, feed hosts change their markup, and a
+# show can move hosts entirely. None of that is visible offline, where the feed
+# is a fixture.
+#
+# Whisper itself is deliberately not run here: it is minutes of CPU per episode
+# and it is the one part that isn't an undocumented remote API. What these check
+# is everything up to it.
+
+SHOW = "The Valued Cultures Podcast"
+
+
+def test_a_show_name_resolves_to_its_feed():
+    """The iTunes Search API, which is the entry point for every podcast run."""
+    import podcast
+    try:
+        feed = podcast.feed_url(SHOW)
+    except LookupError as e:
+        pytest.skip(f"directory unreachable: {e}")
+    assert feed.startswith("http")
+    assert "podbean.com" in feed or ".xml" in feed or "rss" in feed
+
+
+def test_a_real_feed_still_parses_into_episodes():
+    """Feed markup is somebody else's, and it changes without telling us."""
+    import podcast
+    try:
+        show = podcast.episodes(podcast.feed_url(SHOW))
+    except LookupError as e:
+        pytest.skip(f"feed unreachable: {e}")
+    assert show["show"]
+    assert show["episodes"], "feed parsed but yielded no episodes"
+    playable = [e for e in show["episodes"] if e["audio"]]
+    assert playable, "no episode had an <enclosure> to transcribe"
+    ep = playable[0]
+    assert ep["audio"].startswith("http")
+    assert ep["id"] and len(ep["id"]) == 11
+    assert ep["duration_s"] > 0, "no episode duration parsed off the feed"
+
+
+def test_an_apple_link_resolves_by_id():
+    """The lookup path, which avoids fuzzy-matching a show name to the wrong show."""
+    import podcast
+    try:
+        feed = podcast.feed_url(
+            "https://podcasts.apple.com/us/podcast/valued-cultures/id1735589599")
+    except LookupError as e:
+        pytest.skip(f"directory unreachable: {e}")
+    assert "podbean.com" in feed
+
+
+def test_the_episode_audio_is_really_fetchable():
+    """The enclosure being public and undrmed is the assumption the route rests on."""
+    import urllib.request
+    import podcast
+    try:
+        show = podcast.episodes(podcast.feed_url(SHOW))
+    except LookupError as e:
+        pytest.skip(f"feed unreachable: {e}")
+    audio = next(e["audio"] for e in show["episodes"] if e["audio"])
+    req = urllib.request.Request(audio, headers={"User-Agent": podcast.UA})
+    # Range: one frame, not forty megabytes. Enough to prove it serves audio.
+    req.add_header("Range", "bytes=0-2047")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = r.read()
+            ctype = r.headers.get("Content-Type", "")
+    except OSError as e:
+        pytest.skip(f"audio host unreachable: {e}")
+    assert body, "enclosure served no bytes"
+    assert "audio" in ctype or "octet-stream" in ctype, ctype

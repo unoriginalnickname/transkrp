@@ -3,19 +3,39 @@
 Fetches a YouTube transcript as a readable markdown file — prose with a
 `[timestamp]` anchor on every paragraph, so any line traces back to the video.
 
+## Tech stack
+
+| | | |
+|---|---|---|
+| **Python 3.10+** | required | Both dependencies floor there |
+| **yt-dlp** | required | The only runtime dependency: discovery, metadata, chapters, track list |
+| **stdlib `urllib`** | required | The caption fetch itself, and SponsorBlock |
+| **SponsorBlock API** | optional | Ad timings for `--strip-sponsors`; stdlib only, ships with the core |
+| **`claude` CLI** | optional | `--speakers` and the corpus graph. No API key |
+| **nameparser + rapidfuzz** | optional | Name canonicalisation. `pip install ".[speakers]"` |
+| **faster-whisper** | podcasts | Actual speech recognition, for audio nobody published a transcript for. `pip install ".[podcast]"` |
+| **iTunes Search API** | podcasts | Resolves a show's name to its RSS feed. No key, stdlib only |
+| **pytest** | dev | 433 offline tests, 21 live ones behind a marker |
+
+**For YouTube, transcription is YouTube's** — this reads the caption track it
+already published, and the work is downstream of ASR: de-duplication,
+paragraphing, attribution. No audio is decoded on that path.
+
+**For podcasts it's ours**, because most publish no transcript. That's the only
+place here that decodes audio, and the only heavy dependency.
+
+Captions are read as `json3`, not `.vtt`; that choice is why the output isn't
+triplicated ([ADR 0002](docs/adr/0002-json3-not-vtt.md)). Optional pieces import
+lazily, so an install without the extras still fetches transcripts.
+
+## Use
+
 ```
 pip install .
 transkrp "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-Or without installing — it's one file with one dependency:
-
-```
-pip install -r requirements.txt
-python transkrp.py "https://www.youtube.com/watch?v=VIDEO_ID"
-```
-
-Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
+Writes `<title-slug>-<video_id>.md`.
 
 ```
 -o PATH          output file, or a directory (several videos, or a trailing /)
@@ -29,6 +49,11 @@ Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
 --cookies WHAT   browser name or cookies.txt, for age-restricted videos
 --skip-existing  don't refetch what's already in the output directory
 --strip-sponsors drop sponsor reads (SponsorBlock timings); cut spans are recorded
+--speakers       name the speakers and attribute each paragraph (needs `claude`)
+--model ID       model for --speakers (default: whatever claude uses)
+--playlist       take the whole playlist / every episode, not just the one
+--episode TITLE  which podcast episode (default: the most recent)
+--whisper-model  model for podcasts, which have no captions to fetch (default small)
 --force          refetch anyway, when captions have been corrected
 --version
 ```
@@ -36,37 +61,27 @@ Writes `<title-slug>-<video_id>.md`. Needs Python 3.10+.
 Several videos at once, and playlists and channels expand:
 
 ```
-python transkrp.py "https://www.youtube.com/playlist?list=..." -o ./notes/ --skip-existing
+transkrp "https://www.youtube.com/playlist?list=..." -o ./notes/ --skip-existing
 ```
 
 A video shared from inside a playlist (`watch?v=X&list=Y`) is treated as that one
-video, not the playlist around it. One failure doesn't stop the run — the error
-goes to stderr and the rest continue.
-
-### Playlists bigger than the rate limit
+video; `--playlist` says you meant the playlist. One failure doesn't stop a run.
 
 YouTube allows a few hundred caption pulls an hour per IP, so a long playlist
-will get blocked partway. When that happens the run **stops** rather than
-hammering a limiter that just said no, and tells you what's left. Rerun the same
-command later: `--skip-existing` matches on the video id already in each
-filename, so it resumes without spending a request on anything it has.
+gets blocked partway. The run then **stops** rather than hammering a limiter that
+just said no. Rerun the same command later — `--skip-existing` matches on the
+video id in each filename, so it resumes for free.
 
 As a library:
 
 ```python
 from transkrp import transcript
 t = transcript(url)          # JSON-safe dict; raises LookupError on failure
-t["paragraphs"][0]["text"]
 ```
 
-Every failure is a `LookupError`, so catching that one type is enough. Three
-subclasses are there when the difference matters — each implies a different move:
-
-| | Means | Do |
-|---|---|---|
-| `RateLimited` | refused for volume or IP reputation | wait, or use a proxy |
-| `Unavailable` | private, deleted, region-locked, age-gated | skip it for good |
-| `NoCaptions` | video is fine, no usable track | try another `lang` |
+Every failure is a `LookupError`. Three subclasses when the difference matters:
+`RateLimited` (wait, or use a proxy), `Unavailable` (skip it for good),
+`NoCaptions` (try another `lang`).
 
 ## Output
 
@@ -90,201 +105,211 @@ note: unpunctuated speech recognition - no sentence breaks or speaker labels
 the Blue Book files is that...
 ```
 
-Headings are the creator's own chapter titles, taken from the video's metadata —
-so a 33,000-word interview arrives as 19 navigable sections rather than one wall.
-Every timestamp links to that second of the video, which is what makes "check it
-against the audio" a click instead of a scrub. Neither is generated; both were
-sitting in the data already being fetched
-([ADR 0011](docs/adr/0011-exhaust-the-metadata-before-generating.md)).
+Headings are the creator's own chapter titles, from the video's metadata — a
+33,000-word interview arrives as 19 navigable sections rather than one wall.
+Neither headings nor timestamp links are generated; both were in the data already
+being fetched ([ADR 0011](docs/adr/0011-exhaust-the-metadata-before-generating.md)).
 
-`>>` marks a speaker change — the standard caption convention. It says the
-speaker *changed*, not who they are; the tracks don't carry names, so neither
-does this.
+`>>` marks a speaker change, the standard caption convention — but **expect it to
+be absent.** On a 30-episode interview playlist: `turns: 1` on all 30, two people
+talking, no marker anywhere. A congressional hearing carried 474.
 
-**Expect it to be absent.** The marker is a broadcast-captioning convention, and
-YouTube's ASR mostly doesn't emit it. Measured on a 30-episode interview
-playlist: **`turns: 1` on all 30** — two people talking, no marker anywhere. A
-televised congressional hearing, by contrast, carried 474. For podcasts, assume
-no speaker structure — or use `--speakers`.
+The frontmatter tells you whether to trust the file: `source` (`manual` or
+`auto`), `punctuated` (**detected, not assumed** — 18 of those 30 were
+unpunctuated, *including manual tracks*, which are often an ASR export somebody
+uploaded), `translated` (an `en` auto track on a non-English video is a machine
+translation of a machine transcription), and `turns`.
+
+## Podcasts
+
+Same command. A show's name, an RSS feed, or an Apple Podcasts link all work:
+
+```
+transkrp "The Valued Cultures Podcast"                    # the latest episode
+transkrp "The Valued Cultures Podcast" --list             # what's in the feed
+transkrp "The Valued Cultures Podcast" --episode "Garrett Young"
+transkrp "https://feed.podbean.com/valuedcultures/feed.xml" --playlist -o ./notes/
+```
+
+Needs `pip install ".[podcast]"` — this is the one path that decodes audio, since
+most podcasts publish no transcript. If the feed *does* publish one
+(Podcasting 2.0's `<podcast:transcript>`), it's used instead and the run takes
+seconds rather than minutes.
+
+The route is: **iTunes Search API** → the show's real RSS feed → the episode's
+`<enclosure>` MP3 → **faster-whisper** (`small`, int8, CPU) → the same paragraphs
+every other document here has. About 4.5 minutes of CPU for a 41-minute episode.
+
+**Amazon Music and Spotify links don't work, and can't.** yt-dlp refuses them for
+DRM, and the pages are JavaScript shells — Amazon's serves 11KB with no title
+element at all — so there's nothing to scrape even before the DRM. Pass the
+show's name instead; that's what the error says too.
+
+A show means its **most recent episode**, not all of them — the inverse of the
+playlist rule, because every episode is a whisper run and a 21-episode feed is
+about fourteen hours of CPU. `--playlist` takes them all.
+
+The output declares what it is:
+
+```yaml
+source: whisper  # generated by speech recognition, not a published transcript
+model: faster-whisper small (int8, CPU)
+audio: https://mcdn.podbean.com/mf/web/hapjw46hvmxsa8z9/VC_GarrettYoung_031026.mp3
+note: no transcript is published for this episode; every word here is ASR output
+  and names in particular should be checked against the audio
+```
+
+That note is the important line. Whisper punctuates, so the output *looks* clean
+in a way an unpunctuated auto-caption track doesn't — but `small` handles
+conversational English well and proper nouns badly, which is exactly what a
+corpus of people is built from. Timestamps link into the MP3 with `#t=`, so any
+name can be checked against the audio in one click. [ADR 0015](docs/adr/0015-transcribe-podcasts-rather-than-refusing-them.md).
 
 ## Sponsor reads (`--strip-sponsors`)
 
-Every episode of a series opens with the same "thanks to our sponsor, discount
-code" read. Thirty near-identical passages is worse than mild noise in a corpus
-you search: repetition is what makes a passage look salient, so the one thing the
-episodes are *not* about gets boosted for being frequent.
+Thirty near-identical sponsor reads across a series is worse than mild noise in a
+corpus you search: repetition is what makes a passage look salient, so the one
+thing the episodes are *not* about gets boosted for being frequent.
 
-`--strip-sponsors` drops those cues, using [SponsorBlock](https://sponsor.ajay.app/)'s
+`--strip-sponsors` drops them using [SponsorBlock](https://sponsor.ajay.app/)'s
 crowd-sourced timings, and **records what it removed**:
 
 ```yaml
 sponsors_removed: 33:41-35:24  # cut from the transcript, timings from SponsorBlock
 ```
 
-Off by default, because a document called a transcript should contain what was
-said unless you asked otherwise — and because the crowd's timings are only as
-good as the crowd. On the first real video tried, the segment began inside a
-paragraph that opens as the video's conclusion and turns into the ad two
-sentences later, so the cut took those two sentences with it. The frontmatter is
-how you find out. [ADR 0014](docs/adr/0014-strip-sponsor-reads-on-request-and-say-so.md).
+Off by default — a document called a transcript should contain what was said
+unless you asked otherwise, and the crowd's timings are only as good as the
+crowd. On the first real video tried, the segment began two sentences early and
+took part of the conclusion with it. The frontmatter is how you find out.
+[ADR 0014](docs/adr/0014-strip-sponsor-reads-on-request-and-say-so.md).
 
 Nothing here can fail a fetch: no submissions, a timeout, or the service being
-down all mean "no segments", and the transcript comes out intact. The video ID is
-never sent — the query goes to the endpoint keyed by the first four characters of
-its hash, which answers for every video sharing them.
+down all mean "no segments". The video ID is never sent — the query is keyed by
+the first four characters of its hash.
 
 ## Who said what (`--speakers`)
 
-Works out speaker names and attributes each paragraph to one, by running the
-[`claude`](https://claude.com/claude-code) CLI. **No API key** — it uses the
-Claude Code you already have. Roughly ten seconds per short episode.
-
-Needs two extra packages, which the core does not: `pip install ".[speakers]"`.
-
-```
-transkrp "https://www.youtube.com/watch?v=..." --speakers
-```
+Names the speakers and attributes each paragraph, by running the
+[`claude`](https://claude.com/claude-code) CLI. **No API key.** Roughly ten
+seconds per short episode. Needs `pip install ".[speakers]"`.
 
 ```
 [00:01] **Jesse Michels**: on august 9 1969 charles manson led a group of...
 [04:36] **Tom O'Neill?**: even lived with dennis wilson of the beach boys...
 ```
 
-The names come from the video's own metadata, not from the transcript — the
-channel is the host, and the description names the guest *spelled correctly*.
-That last part is the whole trick: ASR mangles exactly the proper nouns a
-cross-referencing corpus is built from. The description says **Tom O'Neill**;
-the transcript says "tom o'neil". It says **Daniel Peter Sheehan**; the
-transcript says "Danny shean".
+The names come from the video's metadata, not the transcript — the channel is the
+host, the description names the guest *spelled correctly*. That's the whole
+trick: ASR mangles exactly the proper nouns a cross-referencing corpus is built
+from. The description says **Tom O'Neill**; the transcript says "tom o'neil".
 
-**`?` means the model was inferring, not certain**, and most labels in a
-narrated video carry it — clips, voiceover and archival audio make turn-taking
-genuinely ambiguous. A paragraph it won't commit to is left unattributed
-entirely. Treat a `?` as a lead, not a fact; the timestamp links to the second
-of video that settles it.
+**`?` means the model was inferring**, and most labels in a narrated video carry
+one — clips and voiceover make turn-taking genuinely ambiguous. A paragraph it
+won't commit to is left unattributed. Treat a `?` as a lead; the timestamp links
+to the second of video that settles it.
 
-Attribution is generated rather than transcribed, so it never touches the
-verbatim text, lives in its own field, and says so in the frontmatter
-([ADR 0011](docs/adr/0011-exhaust-the-metadata-before-generating.md)).
+## A graph of a corpus (`build_graph.py`)
+
+A transcript answers "what was said". A directory of them can answer who keeps
+appearing alongside whom, and on what basis.
+
+```
+python build_graph.py corpus/ai-engineer      # writes corpus/ai-engineer/graph.json
+```
+
+Reads the markdown already in that directory — no refetching — and extracts
+people and relationships from a closed set of six kinds (`interviewed`,
+`worked_with`, `cites`, `co_appeared`, `discussed`, `opposed`). Closed because an
+open set fills with near-synonyms that fragment the graph.
+
+**Every edge cites its evidence, and the citation is checked.** If the quote
+doesn't appear verbatim in the transcript, the edge is *discarded* — a citation
+that doesn't resolve is worse than none, because it looks like proof. Rejections
+are counted, so a model inventing quotes shows up as a number rather than a
+quietly smaller graph
+([ADR 0012](docs/adr/0012-validate-the-model-against-a-domain-model.md)).
+
+People resolve through `ontology.py`, so one person is one node however the
+transcripts spell them. Runs are resumable, and videos that failed are listed in
+the output rather than absorbed into it
+([ADR 0013](docs/adr/0013-a-degraded-graph-must-not-pass-for-a-finished-one.md)).
 
 ## Subtitle files
 
-`-f srt` and `-f vtt` emit the cleaned cues rather than paragraphs — a real
-subtitle file you can load in a player.
-
-Worth having even though yt-dlp hands you a `.vtt` directly, because that one is
-the scrolling caption box serialised frame by frame. Measured on the same
-auto-caption track: **26,402 words from yt-dlp's `.vtt`, 9,086 from ours — 2.9×**.
-Same subtitles, without every phrase three times, and with the lookalike
-typography normalised.
-
-Overlapping cues are truncated at the next cue's start, and zero-length ones are
-given a millisecond, so players don't flicker or leave a caption stuck on screen.
-
-## Frontmatter
-
-Tells you whether to trust the file:
-
-- `source` — `manual` (human-written) or `auto` (speech recognition).
-- `punctuated` — whether it has sentence punctuation. **Detected, not assumed:**
-  "auto" doesn't mean "raw", and "manual" doesn't mean edited. On that same
-  30-episode playlist, 18 came back unpunctuated — *including manual tracks*,
-  which are often just an ASR export somebody uploaded. Assuming would have got
-  those wrong in both directions.
-- `translated` — an `en` auto track on a non-English video is a machine
-  translation of a machine transcription. Treat with suspicion.
-- `turns` — number of speaker changes.
+`-f srt` and `-f vtt` emit the cleaned cues rather than paragraphs. Worth having
+even though yt-dlp hands you a `.vtt`, because that one is the scrolling caption
+box serialised frame by frame: **26,402 words from yt-dlp's `.vtt`, 9,086 from
+ours — 2.9×**. Overlapping cues are truncated at the next cue's start and
+zero-length ones given a millisecond, so players don't flicker.
 
 ## Track selection
 
 In order: a human transcript in English, a human transcript in the language
 spoken, the original speech recognition, and only then a machine translation.
 
-That last ordering matters more than it looks. YouTube lists ~150 machine
-translations of its own ASR alongside the original, so a German video offers an
-`en` auto track — and taking it gives you a machine translation of a machine
-transcription while the human German transcript sits one line below. Two lossy
-steps where one would do.
+That last ordering matters. YouTube lists ~150 machine translations of its own
+ASR alongside the original, so a German video offers an `en` auto track — taking
+it gives you a machine translation of a machine transcription while the human
+German transcript sits one line below.
 
-`--lang auto` skips the English preference entirely. `--lang KEY` forces a
-specific track, and an explicitly requested translation is honoured and flagged.
-
-Keys aren't always the bare code: there's `en-orig` (the original spoken track),
-`en-US`/`en-GB`, and multi-track videos expose `en-<trackid>`. Where several
-tracks in one language exist and none is plainly named, the pick is arbitrary —
-use `--list` to see them.
+`--lang auto` skips the English preference. `--lang KEY` forces a track and an
+explicitly requested translation is honoured and flagged. Keys aren't always the
+bare code — `en-orig`, `en-US`, `en-<trackid>` — so use `--list`.
 
 ## Why not just yt-dlp
 
-yt-dlp does the fetching here, and handles more than you'd expect — including
-preferring manual captions over auto ones by itself. But it gives you a subtitle
-file, not a transcript: cues broken mid-sentence, HTML entities, a timestamp
-every three seconds.
+yt-dlp does the fetching here. But it gives you a subtitle file, not a
+transcript: cues broken mid-sentence, HTML entities, a timestamp every three
+seconds. For auto-captions it's worse than cosmetic — the `.vtt` re-serialises
+the whole caption box every time it scrolls, so a naive strip produced **14,514
+words against this tool's 4,884** on the same talk.
 
-For auto-captions it's worse than cosmetic. The `.vtt` re-serialises the whole
-two-line caption box every time it scrolls, so a naive strip produced **14,514
-words against this tool's 4,884** on the same talk — every phrase three times,
-invisible unless you count.
+This reads `json3`, which represents that scroll as an append rather than by
+repeating text. The duplication is absent by construction: no dedup heuristic to
+get wrong, no threshold to tune. (Tools that strip `.vtt` have to guess, and a
+speaker who genuinely repeats themselves is indistinguishable from the artifact.)
 
-This reads the `json3` format instead, which represents that scroll as an append
-of a newline rather than by repeating the text. The duplication is absent by
-construction; there's no dedup heuristic here to get wrong, and no threshold to
-tune. (Tools that do strip `.vtt` have to guess, and a speaker who genuinely
-repeats themselves is indistinguishable from the artifact.)
-
-So: yt-dlp fetches; this reads a format that doesn't duplicate, splits speaker
-turns, and reflows cues into paragraphs.
-
-`youtube-transcript-api` is a fine alternative — it handles the duplication too,
-and produces byte-identical segment text (verified: 676 segments, 0 differences).
-It's chosen against only because it returns no video metadata, so the title would
-need a second fetch.
+`youtube-transcript-api` is a fine alternative — byte-identical segment text,
+verified. It's chosen against only because it returns no video metadata.
 
 ## Limits
 
-- No captions, no output.
-- Speaker changes are marked, but speakers aren't named — the tracks don't say.
-  Naming them means diarizing the audio, which is a different tool.
+- No captions, no output — on YouTube. A podcast with no transcript gets one
+  made, which is slower and less accurate; a YouTube video with captions
+  disabled is simply not available.
+- The tracks carry no names, so the default output has none. `--speakers` infers
+  them from metadata — a guess with a `?` on it, not diarization.
 - ASR mangles proper nouns. The timestamps are there so anything load-bearing can
   be checked against the audio.
-- YouTube rate-limits caption pulls per IP (a few hundred an hour) and blocks
-  datacenter ranges outright. Fine from a laptop; from a cloud box you'll need
-  `--proxy` with a residential endpoint.
-- Paragraphs are reading units, not RAG chunks. `--words 250` gets you closer to
-  chunk-shaped; every paragraph carries `start_ms` and `turn` so a consumer can
-  group them itself.
+- YouTube rate-limits caption pulls per IP and blocks datacenter ranges outright.
+  Fine from a laptop; from a cloud box you'll need `--proxy` with a residential
+  endpoint.
+- Paragraphs are reading units, not RAG chunks. `--words 250` gets closer; every
+  paragraph carries `start_ms` and `turn` so a consumer can group them itself.
 
 ## Development
 
 ```
 pip install -e ".[dev]"
-python -m pytest -q          # 150 offline tests, no network
-python -m pytest -m network  # 12 live tests, really hits YouTube
+python -m pytest -q          # 433 offline tests, no network
+python -m pytest -m network  # 21 live tests, really hits YouTube
 ```
 
-Offline tests come in two kinds. Most stub the caption fetch at `_get` and cover
-the things that go wrong quietly: the paragraph break rules, punctuation
-detection, the retry policy, batch resume, and the empty-body response that means
-a PO token is needed.
+Most offline tests stub the caption fetch at `_get`, or the `claude` CLI, or
+whisper, and cover what goes wrong quietly: paragraph breaks, punctuation
+detection, the retry policy, batch resume, name canonicalisation, feed parsing,
+the evidence check that discards an unsupported edge, and the empty-body response
+that means a PO token is needed.
+`tests/test_http.py` runs against a real localhost server, so the rate-limit path
+is *observed* — a genuine 429 off a socket, real `urllib`, real timeouts.
 
-The rest (`tests/test_http.py`) run against a real HTTP server on localhost, so
-the rate-limit path is *observed* rather than assumed — a genuine 429 off a
-socket, real `urllib`, real timeouts, and the batch run giving up and printing
-how to resume. The alternative, provoking YouTube into really rate-limiting you,
-costs a home IP that can't fetch transcripts for hours in exchange for one test
-run.
+The live tests are the ones that matter when something breaks: the offline suite
+will happily report green while the tool is broken against YouTube, because
+everything it depends on is an undocumented endpoint that changes without notice.
+They're out of CI on purpose — GitHub runners have datacenter IPs, which YouTube
+blocks, so the job would fail on a healthy tree
+([ADR 0010](docs/adr/0010-ci-runs-offline-only.md)).
 
-The live ones are the ones that matter when something breaks — the offline suite
-will happily report 128 green while the tool is completely broken against
-YouTube, because everything it depends on is an undocumented endpoint that
-changes without notice. They're not in CI on purpose: GitHub runners have
-datacenter IPs and YouTube blocks those outright, so the job would fail on a
-healthy tree ([ADR 0010](docs/adr/0010-ci-runs-offline-only.md)). Run them
-locally when something looks wrong; they take five seconds.
-
-Design decisions that aren't obvious from the code are in
-[docs/adr/](docs/adr/README.md) — including why `json3` and not `vtt`, and why
-speakers aren't named. The survey behind them is in
-[docs/research/](docs/research/2026-07-youtube-transcript-extraction.md): how
-extraction actually works, what was measured against the live API, and which
-widely-repeated advice turned out to be wrong.
+Design decisions live in [docs/adr/](docs/adr/README.md); the survey behind them
+is in [docs/research/](docs/research/2026-07-youtube-transcript-extraction.md).
