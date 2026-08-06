@@ -29,6 +29,7 @@ once accepted — superseded by a later record instead.
 | [0013](0013-a-degraded-graph-must-not-pass-for-a-finished-one.md) | A degraded graph must not pass for a finished one | Accepted |
 | [0014](0014-strip-sponsor-reads-on-request-and-say-so.md) | Strip sponsor reads on request, and say so in the document | Accepted |
 | [0015](0015-transcribe-podcasts-rather-than-refusing-them.md) | Transcribe podcasts ourselves, rather than refusing them | Accepted |
+| [0016](0016-obsidian-is-the-graph-viewer.md) | Obsidian is the graph viewer, and the transcripts stay untouched | Accepted |
 
 The survey these draw on is
 [docs/research/2026-07-youtube-transcript-extraction.md](../research/2026-07-youtube-transcript-extraction.md)

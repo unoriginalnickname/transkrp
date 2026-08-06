@@ -294,7 +294,14 @@ def merge(results: list[dict]) -> dict:
                 # connects things nobody connects.
                 key = f"{key}@{result.get('video_id', id(result))}"
             node = people.setdefault(key, {"name": person["name"], "roles": [],
-                                           "videos": 0})
+                                           "videos": 0, "appears_in": [],
+                                           # Kept rather than discarded after
+                                           # scoping: a consumer needs to know a
+                                           # bare given name identifies someone
+                                           # inside one recording and nowhere
+                                           # else, or it will publish "Barry" as
+                                           # a person in the world.
+                                           "local": bool(person.get("local"))})
             # Keep the fullest spelling seen anywhere.
             if len(person["name"]) > len(node["name"]):
                 node["name"] = person["name"]
@@ -303,6 +310,11 @@ def merge(results: list[dict]) -> dict:
             if key not in seen_here:
                 seen_here.add(key)
                 node["videos"] += 1
+                # Which recordings, not just how many. "Where have I seen this
+                # person before" is the question a corpus exists to answer, and
+                # the count alone cannot answer it.
+                node["appears_in"].append({"video": result.get("video", ""),
+                                           "video_id": result.get("video_id", "")})
         edges += result.get("edges") or []
 
     failures = [{"video": r.get("video", ""), "why": r["failed"]}
