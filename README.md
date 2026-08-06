@@ -15,7 +15,7 @@ Fetches a YouTube transcript as a readable markdown file — prose with a
 | **nameparser + rapidfuzz** | optional | Name canonicalisation. `pip install ".[speakers]"` |
 | **faster-whisper** | podcasts | Actual speech recognition, for audio nobody published a transcript for. `pip install ".[podcast]"` |
 | **iTunes Search API** | podcasts | Resolves a show's name to its RSS feed. No key, stdlib only |
-| **pytest** | dev | 433 offline tests, 21 live ones behind a marker |
+| **pytest** | dev | 451 offline tests, 21 live ones behind a marker |
 
 **For YouTube, transcription is YouTube's** — this reads the caption track it
 already published, and the work is downstream of ASR: de-duplication,
@@ -235,6 +235,42 @@ transcripts spell them. Runs are resumable, and videos that failed are listed in
 the output rather than absorbed into it
 ([ADR 0013](docs/adr/0013-a-degraded-graph-must-not-pass-for-a-finished-one.md)).
 
+## Reading it in Obsidian
+
+```
+python obsidian.py corpus/ai-engineer     # then open that folder as a vault
+```
+
+Obsidian is the viewer — there isn't one here, and there shouldn't be. But it
+draws a line between two notes only when one links to the other, and transcripts
+contain no `[[links]]` at all, so a corpus opens as forty disconnected dots with
+every relationship sitting invisible in `graph.json`.
+
+This writes the missing links: a note per person, linking to the transcripts they
+appear in and the people they connect to, **each connection carrying the quote
+that evidences it and a timestamp into the video**.
+
+```markdown
+## Connections
+
+- was publicly disagreed with by [[Ian Livingstone]]
+  > So, I think first and foremost, I'm coming for you Dex.
+  — [10:28](https://www.youtube.com/watch?v=c35YoMdnI78&t=628s) in The Great Loops Debate
+```
+
+**The transcripts are never modified.** Every link lives in a new note under
+`People/`, because Obsidian draws the same line whichever end holds it — and the
+transcripts are the verbatim record, possibly annotated by hand. Delete the
+folder and the corpus is byte-for-byte what it was.
+
+Someone known only by a first name gets no note, and is named in bold rather than
+linked: `graph.py` already scopes bare given names to one video, since "Barry"
+identifies someone inside that recording and nobody across a corpus, and 35 of
+these 104 are that. A note each would add 35 hubs joining videos that share
+nothing, and an unresolved `[[link]]` puts a ghost node on the graph that looks
+like a real person until you click it. On this corpus: 69 notes, 152 links,
+**0 unresolved**. [ADR 0016](docs/adr/0016-obsidian-is-the-graph-viewer.md).
+
 ## Subtitle files
 
 `-f srt` and `-f vtt` emit the cleaned cues rather than paragraphs. Worth having
@@ -292,7 +328,7 @@ verified. It's chosen against only because it returns no video metadata.
 
 ```
 pip install -e ".[dev]"
-python -m pytest -q          # 433 offline tests, no network
+python -m pytest -q          # 451 offline tests, no network
 python -m pytest -m network  # 21 live tests, really hits YouTube
 ```
 
