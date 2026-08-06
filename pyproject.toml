@@ -37,6 +37,11 @@ dependencies = ["yt-dlp>=2026.7.4"]
 # --speakers only. The core stays on its single dependency: fetching a
 # transcript needs neither of these, and most people never run attribution.
 speakers = ["nameparser>=1.1", "rapidfuzz>=3"]
+# --- podcasts only. Everything above this line is a few hundred kilobytes;
+# faster-whisper brings CTranslate2, av, tokenizers and onnxruntime, which is
+# hundreds of megabytes. Finding a feed and listing its episodes needs none of
+# it — only transcribing does, so the import sits inside that one function.
+podcast = ["faster-whisper>=1.1"]
 dev = ["pytest>=8", "nameparser>=1.1", "rapidfuzz>=3"]
 
 [project.scripts]
@@ -48,11 +53,13 @@ Source = "https://github.com/unoriginalnickname/transkrp"
 Issues = "https://github.com/unoriginalnickname/transkrp/issues"
 
 [tool.setuptools]
-# `sponsors` ships with the core: stdlib only, and transkrp imports it at module
-# level. `speakers`, `ontology` and `graph` are deliberately absent — they need
-# the [speakers] extras and are imported lazily, inside the functions that use
-# them, so an install without the extras still runs.
-py-modules = ["transkrp", "sponsors"]
+# `sponsors` and `podcast` ship with the core: both are stdlib only, and transkrp
+# imports them at module level. `podcast` earns its place there because finding a
+# feed and listing episodes needs nothing extra; its one heavy import (whisper)
+# is inside the function that transcribes. `speakers`, `ontology` and `graph` are
+# deliberately absent — they need the [speakers] extras and are imported lazily,
+# inside the functions that use them, so an install without the extras still runs.
+py-modules = ["transkrp", "sponsors", "podcast"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
