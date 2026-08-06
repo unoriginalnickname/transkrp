@@ -15,7 +15,7 @@ Fetches a YouTube transcript as a readable markdown file — prose with a
 | **nameparser + rapidfuzz** | optional | Name canonicalisation. `pip install ".[speakers]"` |
 | **faster-whisper** | podcasts | Actual speech recognition, for audio nobody published a transcript for. `pip install ".[podcast]"` |
 | **iTunes Search API** | podcasts | Resolves a show's name to its RSS feed. No key, stdlib only |
-| **pytest** | dev | 451 offline tests, 21 live ones behind a marker |
+| **pytest** | dev | 458 offline tests, 21 live ones behind a marker |
 
 **For YouTube, transcription is YouTube's** — this reads the caption track it
 already published, and the work is downstream of ASR: de-duplication,
@@ -263,13 +263,36 @@ that evidences it and a timestamp into the video**.
 transcripts are the verbatim record, possibly annotated by hand. Delete the
 folder and the corpus is byte-for-byte what it was.
 
-Someone known only by a first name gets no note, and is named in bold rather than
-linked: `graph.py` already scopes bare given names to one video, since "Barry"
-identifies someone inside that recording and nobody across a corpus, and 35 of
-these 104 are that. A note each would add 35 hubs joining videos that share
-nothing, and an unresolved `[[link]]` puts a ghost node on the graph that looks
-like a real person until you click it. On this corpus: 69 notes, 152 links,
-**0 unresolved**. [ADR 0016](docs/adr/0016-obsidian-is-the-graph-viewer.md).
+### Link strength
+
+Not every connection is worth the same, so they don't render the same. Obsidian
+has **no per-link weight** — the thickness slider is global — so the hierarchy is
+encoded in the two things it does read: node resolution, and tags.
+
+| | What it is | How it looks |
+|---|---|---|
+| **Stated** | the speaker said it | `## Connections`, a normal link |
+| **Implied** | the model inferred it | `## Possible connections`, hedged at the heading |
+| **Local** | known only by a first name | a scoped link — small, dim, unresolved |
+
+That last tier is why a first name doesn't just get dropped. A bare `[[Barry]]`
+would merge every Barry in the corpus into one hub joining videos that share
+nothing, so the link carries the video id — `[[Barry (c35YoMdnI78)|Barry]]` —
+which keeps them apart while still drawing the faint node Obsidian gives an
+unresolved link for free. On this corpus that scoping separates **29 people where
+unscoped would have merged them into 26**.
+
+To see the tiers, add two colour groups in Graph view → Groups:
+`tag:#person/recurring` and `tag:#person/named`.
+
+`--weights` additionally emits `[[Name]]::3` / `::1` for the
+[weighted-graph plugin](https://github.com/jamesms36/obsidian-weighted-graph),
+the only way to get a genuinely thicker line. Off by default, because stock
+Obsidian shows that suffix as literal text.
+
+Measured: 152 resolved links, 34 scoped weak ones, **0 dangling**.
+[ADR 0016](docs/adr/0016-obsidian-is-the-graph-viewer.md),
+[ADR 0017](docs/adr/0017-three-tiers-of-link-strength.md).
 
 ## Subtitle files
 
@@ -328,7 +351,7 @@ verified. It's chosen against only because it returns no video metadata.
 
 ```
 pip install -e ".[dev]"
-python -m pytest -q          # 451 offline tests, no network
+python -m pytest -q          # 458 offline tests, no network
 python -m pytest -m network  # 21 live tests, really hits YouTube
 ```
 

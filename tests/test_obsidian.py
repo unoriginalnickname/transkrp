@@ -91,26 +91,100 @@ def test_a_first_name_only_person_gets_no_note(corpus):
     assert set(notes(corpus)) == {"Dex Horthy", "Ian Livingstone"}
 
 
-def test_a_person_with_no_note_is_named_but_not_linked(corpus):
-    """An unresolved [[Barry]] would put a ghost node on the graph."""
+def test_a_first_name_is_linked_but_scoped_to_its_recording(corpus):
+    """The weakest tier: a dim unresolved node that cannot merge with another.
+
+    A bare `[[Barry]]` would collapse every Barry in the corpus into one hub.
+    Scoped, each stays attached to the one video it is real in, and Obsidian
+    renders an unresolved link smaller and dimmer — the only native "weaker".
+    """
     obsidian.write(str(corpus))
     dex = notes(corpus)["Dex Horthy"]
     assert "[[Barry]]" not in dex
-    assert "**Barry**" in dex          # still named, and still carries its quote
+    assert "[[Barry (c35YoMdnI78)|Barry]]" in dex
     assert "Barry and I put that together" in dex
+
+
+def test_two_people_sharing_a_first_name_never_become_one_node(tmp_path):
+    """The whole reason for scoping. Same name, two videos, two nodes."""
+    graph = json.loads(json.dumps(GRAPH))
+    graph["edges"].append({
+        "from": "Ian Livingstone", "to": "Barry", "kind": "worked_with",
+        "evidence": "Barry had the other half of it", "timestamp": "01:00",
+        "confidence": "high", "video": "A Different Talk",
+        "url": "https://www.youtube.com/watch?v=DIFFERENT11&t=60s"})
+    (tmp_path / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    obsidian.write(str(tmp_path))
+    written = notes(tmp_path)
+    assert "[[Barry (c35YoMdnI78)|Barry]]" in written["Dex Horthy"]
+    assert "[[Barry (DIFFERENT11)|Barry]]" in written["Ian Livingstone"]
+
+
+def test_a_title_is_never_used_to_scope_when_an_id_is_available(corpus):
+    """Two talks from one conference share their first forty characters."""
+    obsidian.write(str(corpus))
+    assert "(The Great Loops Debate" not in notes(corpus)["Dex Horthy"]
+
+
+# --- the hierarchy ----------------------------------------------------------
+
+def test_people_are_tagged_by_how_well_the_corpus_knows_them(corpus):
+    """The tag is what graph view's colour groups can actually query."""
+    obsidian.write(str(corpus))
+    written = notes(corpus)
+    assert "- person/recurring" in written["Dex Horthy"]      # 2 videos
+    assert "- person/named" in written["Ian Livingstone"]     # 1 video
+
+
+def test_stated_and_implied_connections_are_kept_apart(corpus):
+    """Run together under one heading, the weaker claim reads as the stronger."""
+    obsidian.write(str(corpus))
+    dex = notes(corpus)["Dex Horthy"]
+    stated, _, implied = dex.partition("## Possible connections")
+    assert "## Connections" in stated
+    assert "Ian Livingstone" in stated        # high confidence
+    assert "Barry" in implied                 # low confidence
+    assert "Barry" not in stated
+
+
+def test_a_note_with_only_confident_edges_has_no_possible_heading(corpus):
+    obsidian.write(str(corpus))
+    assert "## Possible connections" not in notes(corpus)["Ian Livingstone"]
+
+
+def test_weights_are_off_by_default(corpus):
+    """Stock Obsidian shows `::3` as literal text, so it must be asked for."""
+    obsidian.write(str(corpus))
+    assert "::" not in notes(corpus)["Dex Horthy"]
+
+
+def test_weights_grade_the_link_when_asked(corpus):
+    obsidian.write(str(corpus), weights=True)
+    dex = notes(corpus)["Dex Horthy"]
+    assert "[[Ian Livingstone]]::3" in dex     # stated
+    assert "::1" in dex                        # implied
 
 
 # --- the links ---------------------------------------------------------------
 
-def test_every_link_resolves_to_a_note_that_exists(corpus):
-    """A link that doesn't resolve is this graph's version of a bad citation."""
+def test_no_link_is_unresolved_except_a_deliberately_scoped_one(corpus):
+    """An accidental dangling link is a ghost node; a scoped one is the weak tier.
+
+    The distinction is the whole hierarchy: a link either points at a real note,
+    or it is a first-name person carrying the video id that keeps them apart.
+    Anything else is a bug that looks like a person until you click it.
+    """
     import re
     obsidian.write(str(corpus))
     written = notes(corpus)
     targets = set(written) | {p.stem for p in corpus.glob("*.md")}
     for name, body in written.items():
         for m in re.finditer(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", body):
-            assert m.group(1) in targets, f"{name} links to missing {m.group(1)!r}"
+            target = m.group(1)
+            if target in targets:
+                continue
+            assert re.search(r" \([\w-]{11}\)$", target), \
+                f"{name} has a dangling link to {target!r}"
 
 
 def test_a_transcript_is_linked_by_filename_and_shown_by_title(corpus):
@@ -145,14 +219,15 @@ def test_the_evidence_and_its_timestamp_travel_into_the_note(corpus):
 
 
 def test_an_inferred_connection_says_so(corpus):
+    """Hedged once, under its own heading, rather than on every line."""
     obsidian.write(str(corpus))
-    assert "implies this rather than saying it" in notes(corpus)["Dex Horthy"]
+    assert "implies these rather than saying them" in notes(corpus)["Dex Horthy"]
 
 
 def test_a_confident_connection_is_not_hedged(corpus):
     obsidian.write(str(corpus))
     ian = notes(corpus)["Ian Livingstone"]
-    assert "implies this" not in ian
+    assert "implies" not in ian
 
 
 # --- filenames ---------------------------------------------------------------

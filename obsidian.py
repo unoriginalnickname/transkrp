@@ -49,6 +49,11 @@ PHRASING = {
 # Windows and Obsidian both refuse these in a filename.
 _UNSAFE = re.compile(r'[\\/:*?"<>|#^\[\]]')
 
+# Only read by the weighted-graph plugin, which draws thickness from `[[X]]::n`.
+# Stock Obsidian has no per-link weight at all — the thickness slider is global —
+# so the hierarchy that works everywhere is the one in the headings and tags.
+WEIGHT = {"high": 3, "low": 1}
+
 
 def note_name(person: str) -> str:
     """A filename for a person that Obsidian will accept and still recognise.
@@ -93,12 +98,71 @@ def _quote(text: str, limit: int = 240) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
 
 
+def tier(person: dict) -> str:
+    """How much the corpus actually knows about someone.
+
+    Measured on the corpus this was built against, recurrence is not the useful
+    axis: 4 people appear in more than one video and **no edge joins two of
+    them**, so a hierarchy built on it would put nothing in its top tier. It is
+    still the honest label for a node — a person seen three times is a different
+    kind of entry from one seen once — and the tier that carries the weight is
+    the confidence split on the edges, which is 63/11.
+    """
+    if person.get("local"):
+        return "person/local"
+    return "person/recurring" if person.get("videos", 0) >= 2 else "person/named"
+
+
+def _scoped(name: str, edge: dict) -> str:
+    """A first-name-only person, named so two of them never become one node.
+
+    This is the weakest tier, and it is a *link* rather than bold text — which
+    reverses part of ADR 0016. The reason that decision gave still stands: an
+    unresolved `[[Barry]]` merges every Barry in the corpus into one hub joining
+    videos that share nothing. Scoping it to the recording defeats exactly that,
+    and buys the thing Obsidian gives for free — an unresolved link draws a
+    smaller, dimmer node, which is the only native rendering of "weaker" there
+    is. See ADR 0017.
+    """
+    # Scoped by video id, not title. A truncated title is prettier on hover and
+    # wrong: two talks from one conference share their first forty characters
+    # often, and a collision merges exactly the two people this is separating.
+    # The id is also what every transcript filename here already ends with.
+    m = re.search(r"[?&]v=([\w-]{11})", edge.get("url", "") or "")
+    scope = m.group(1) if m else _quote(edge.get("video", ""), 40)
+    label = f"{name} ({scope})" if scope else name
+    return _link(note_name(label), name)
+
+
+def _connection(edge: dict, name: str, known: set[str], weights: bool) -> list[str]:
+    outgoing = edge.get("from") == name
+    other = edge.get("to") if outgoing else edge.get("from")
+    phrase = PHRASING.get(edge.get("kind", ""), ("is connected to",) * 2)[
+        0 if outgoing else 1]
+    shown = _link(note_name(other)) if other in known else _scoped(other, edge)
+    # For the weighted-graph plugin, which is the only way to get a genuinely
+    # thicker line: stock Obsidian has no per-link weight, so this is inert
+    # unless that plugin is installed, and harmless when it isn't.
+    if weights:
+        shown += f"::{WEIGHT.get(edge.get('confidence'), 1)}"
+    out = [f"- {phrase} {shown}"]
+    if evidence := _quote(edge.get("evidence", "")):
+        out.append(f"  > {evidence}")
+    where, stamp, url = edge.get("video", ""), edge.get("timestamp", ""), edge.get("url", "")
+    if url and stamp:
+        out.append(f"  — [{stamp}]({url}) in {where}")
+    elif where:
+        out.append(f"  — {where}")
+    out.append("")
+    return out
+
+
 def person_note(person: dict, edges: list[dict], known: set[str],
-                files: dict[str, str]) -> str:
+                files: dict[str, str], weights: bool = False) -> str:
     """One person's note: who they are, who they connect to, and where."""
     name = person["name"]
-    lines = ["---", "tags:", "  - person", f"appearances: {person['videos']}", "---",
-             "", f"# {name}", ""]
+    lines = ["---", "tags:", "  - person", f"  - {tier(person)}",
+             f"appearances: {person['videos']}", "---", "", f"# {name}", ""]
 
     if person.get("roles"):
         # Several descriptions of one person, from several transcripts. Kept as
@@ -109,30 +173,22 @@ def person_note(person: dict, edges: list[dict], known: set[str],
         lines.append("")
 
     mine = [e for e in edges if e.get("from") == name or e.get("to") == name]
-    if mine:
+    # Split by what the transcript actually did. "The model was inferring" and
+    # "the speaker said it out loud" are different claims, and running them
+    # together under one heading is how the weaker one gets read as the stronger.
+    stated = [e for e in mine if e.get("confidence") != "low"]
+    implied = [e for e in mine if e.get("confidence") == "low"]
+
+    if stated:
         lines += ["## Connections", ""]
-        for edge in mine:
-            outgoing = edge.get("from") == name
-            other = edge.get("to") if outgoing else edge.get("from")
-            phrase = PHRASING.get(edge.get("kind", ""), ("is connected to",) * 2)[
-                0 if outgoing else 1]
-            # A name with no note of its own stays plain text. An unresolved
-            # link would put a ghost node on the graph for someone the corpus
-            # only ever knew by a first name.
-            shown = _link(note_name(other)) if other in known else f"**{other}**"
-            lines.append(f"- {phrase} {shown}")
-            if evidence := _quote(edge.get("evidence", "")):
-                lines.append(f"  > {evidence}")
-            where = edge.get("video", "")
-            stamp = edge.get("timestamp", "")
-            url = edge.get("url", "")
-            if url and stamp:
-                lines.append(f"  — [{stamp}]({url}) in {where}")
-            elif where:
-                lines.append(f"  — {where}")
-            if edge.get("confidence") == "low":
-                lines.append("  — *the transcript implies this rather than saying it*")
-            lines.append("")
+        for edge in stated:
+            lines += _connection(edge, name, known, weights)
+
+    if implied:
+        lines += ["## Possible connections", "",
+                  "*The transcript implies these rather than saying them.*", ""]
+        for edge in implied:
+            lines += _connection(edge, name, known, weights)
 
     appearances = person.get("appears_in") or []
     if appearances:
@@ -148,48 +204,59 @@ def person_note(person: dict, edges: list[dict], known: set[str],
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write(corpus: str, out: str | None = None) -> dict:
+def write(corpus: str, out: str | None = None, weights: bool = False) -> dict:
     graph = load(corpus)
     folder = out or os.path.join(corpus, "People")
     os.makedirs(folder, exist_ok=True)
     files = transcripts(corpus)
 
-    # Bare given names are scoped to one recording by graph.merge, because
-    # "Barry" identifies someone inside that video and nobody in the world.
-    # Thirty-five of the hundred and four here are that. A note each would put
-    # thirty-five hubs on the graph joining videos that share nothing.
+    # A note only for people the corpus can identify across it. Bare given names
+    # still get *linked* — scoped to their recording, so they land as dim
+    # unresolved nodes instead of one merged hub — but a note would promote them
+    # to a first-class entry they haven't earned.
     people = [p for p in graph.get("people") or [] if not p.get("local")]
     known = {p["name"] for p in people}
+    edges = graph.get("edges") or []
 
     written = 0
     for person in people:
         path = os.path.join(folder, f"{note_name(person['name'])}.md")
         with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(person_note(person, graph.get("edges") or [], known, files))
+            f.write(person_note(person, edges, known, files, weights))
         written += 1
 
-    linked = sum(1 for e in graph.get("edges") or []
-                 if e.get("from") in known and e.get("to") in known)
-    return {"people": written, "skipped": len(graph.get("people") or []) - written,
-            "edges": linked, "folder": folder, "transcripts": len(files)}
+    strong = sum(1 for e in edges if e.get("confidence") != "low")
+    return {"people": written, "folder": folder, "transcripts": len(files),
+            "edges": len(edges), "stated": strong, "implied": len(edges) - strong,
+            "recurring": sum(1 for p in people if p.get("videos", 0) >= 2),
+            "local": len(graph.get("people") or []) - written}
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A Windows console defaults to cp1252, which cannot encode an arrow or an
+    # em dash — and every name in this corpus is somebody's, so the output is
+    # full of characters it has no idea about. Same guard transkrp.main uses.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
-        print("\nusage: python obsidian.py <corpus dir> [--out FOLDER]")
+        print("\nusage: python obsidian.py <corpus dir> [--out FOLDER] [--weights]")
+        print("\n  --weights   also emit [[Name]]::n for the weighted-graph plugin,")
+        print("              which is the only way to get a genuinely thicker line.")
         return 0
     corpus = args[0]
     out = args[args.index("--out") + 1] if "--out" in args else None
-    result = write(corpus, out)
-    print(f"{result['people']} people written to {result['folder']}")
-    print(f"  {result['edges']} connections between them, each with its evidence")
-    print(f"  {result['transcripts']} transcripts linked")
-    if result["skipped"]:
-        print(f"  {result['skipped']} skipped: known only by a first name, "
-              f"so they identify someone inside one video and nobody across the corpus")
-    print("\nOpen the corpus folder as an Obsidian vault to see the graph.")
+    result = write(corpus, out, weights="--weights" in args)
+    print(f"{result['people']} people written to {result['folder']}, "
+          f"{result['transcripts']} transcripts linked")
+    print(f"  {result['stated']} connections the transcript states")
+    print(f"  {result['implied']} it only implies, under their own heading")
+    print(f"  {result['local']} people known by a first name: linked but scoped to "
+          f"their recording, so they stay dim and separate")
+    print("\nOpen the corpus folder as a vault. To see the tiers, add colour groups")
+    print("in Graph view → Groups:  tag:#person/recurring  and  tag:#person/named")
     return 0
 
 
